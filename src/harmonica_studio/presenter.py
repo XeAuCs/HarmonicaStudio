@@ -19,7 +19,12 @@ class DesktopPresenter:
         elif event == 'parts':
             view.install_parts()
         elif event == 'library':
+            view.watch_library()
             view.render_library()
+        elif event == 'library_requested':
+            view.watch_library()
+        elif event == 'close_ready':
+            view.finish_close()
         elif event == 'changed':
             view.update_summary()
             view.refresh_controls()

@@ -37,7 +37,7 @@ class SettingsWorkflowTests(unittest.TestCase):
         self.window.show();self.app.processEvents()
 
     def tearDown(self):
-        self.finish();self.window.close();self.app.processEvents();self.temp.cleanup()
+        self.finish();self.window.controller.close();self.window.close();self.app.processEvents();self.temp.cleanup()
         self.assertEqual(self.errors,[])
 
     def wait_for(self,condition):
@@ -47,7 +47,12 @@ class SettingsWorkflowTests(unittest.TestCase):
             self.app.processEvents();QTest.qWait(10)
 
     def finish(self):
-        self.wait_for(lambda:self.window.controller.jobs.current is None)
+        def completed():
+            # Some playback tests intentionally stop the window's polling timer.
+            self.window.poll()
+            return (self.window.controller.jobs.current is None and not self.window.controller.library_refreshing
+                    and not self.window.controller.saving and self.window.controller.state.transition is None)
+        self.wait_for(completed)
 
     def add_song(self):
         song=self.folder/'测试曲.mid'
@@ -109,7 +114,7 @@ class SettingsWorkflowTests(unittest.TestCase):
         try:
             self.assertEqual(other.mode.currentData(),'continuous')
             self.assertTrue(other.phrase_octave.isChecked())
-        finally:other.close()
+        finally:other.controller.close();other.close()
 
     def test_theme_preview_cancel_and_save_persist(self):
         observed=[]
@@ -128,7 +133,7 @@ class SettingsWorkflowTests(unittest.TestCase):
         QTimer.singleShot(20,save_settings);self.window.open_settings()
         stored=load_preferences(self.home/'preferences.json')
         self.assertEqual((stored.theme,stored.compact),('plum',True))
-        self.window.close();self.app.processEvents()
+        self.window.controller.close();self.window.close();self.app.processEvents()
         self.window=MainWindow(home=self.home,audio=FakeAudio());self.window.show_error=lambda error:self.errors.append(str(error))
         self.assertTrue(self.window.compact)
         self.assertEqual(self.window.roll._theme['accent'].name(),theme_palette('plum')['accent'].lower())

@@ -11,7 +11,8 @@ from harmonica_studio.midi import read_midi, write_midi
 from harmonica_studio.models import Options
 from harmonica_studio.preview import decode_events
 from harmonica_studio.project import make_project, validate_project, save_project, load_project
-from harmonica_studio.service import convert, export_project
+from harmonica_studio.service import convert, export_project, export_project_prepared, convert_prepared
+from harmonica_studio.transport import playback_anchors, TimeMap
 
 
 def note(pitch=60, start=0, end=.2):
@@ -25,6 +26,43 @@ class ProjectTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_prepared_export_matches_published_files_and_preserves_input(self):
+        project = make_project([note(), note(62, 5, 5.2)], options={'skip_long_rests': True})
+        original = copy.deepcopy(project)
+        result = export_project_prepared(project, self.root / 'exports')
+        self.assertEqual(project, original)
+        self.assertEqual(result.project, load_project(result.folder / '工程.hstudio'))
+        self.assertEqual(result.actual, json.loads((result.folder / '音符.json').read_text(encoding='utf-8')))
+        self.assertEqual(result.report, json.loads((result.folder / '转换报告.json').read_text(encoding='utf-8')))
+        anchors = playback_anchors(project['notes'], result.actual)
+        forward, backward = TimeMap(anchors), TimeMap((b, a) for a, b in anchors)
+        for value in (0, .1, .2, 1, 3, 5, 5.2):
+            self.assertAlmostEqual(result.to_audio(value), forward(value))
+            self.assertAlmostEqual(result.to_score(value), backward(value))
+        result.project['notes'][0]['pitch'] = 70
+        self.assertEqual(project, original)
+
+    def test_prepared_conversion_keeps_legacy_export_contents(self):
+        source = self.root / 'input.mid'
+        write_midi([note(), note(62, .3, .5)], source)
+        folder, report = convert(source, self.root / 'exports')
+        result = convert_prepared(source, self.root / 'exports')
+        self.assertEqual(result.report, report)
+        self.assertEqual(result.project, load_project(folder / '工程.hstudio'))
+        for path in folder.iterdir():
+            self.assertEqual(path.read_bytes(), (result.folder / path.name).read_bytes(), path.name)
+
+    def test_result_preparation_failure_preserves_existing_exports_and_cleans_staging(self):
+        project = make_project([note()])
+        output = self.root / 'exports'
+        folder, _ = export_project(project, output)
+        original = {path.name: path.read_bytes() for path in folder.iterdir()}
+        with patch('harmonica_studio.service.playback_anchors', side_effect=ValueError('map')):
+            with self.assertRaisesRegex(ValueError, 'map'):
+                export_project_prepared(project, output)
+        self.assertEqual(list(output.iterdir()), [folder])
+        self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, original)
 
     def test_roundtrip_is_self_contained_after_source_removed(self):
         source = self.root/'source.mid'

@@ -1,10 +1,12 @@
 """Headless application contracts. No QApplication, dialogs, real audio or AHK."""
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from threading import get_ident
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from harmonica_studio.diagnostics import FakeAudio
 from harmonica_studio.midi import write_midi
 from harmonica_studio.project import load_project, make_project, save_project
 from harmonica_studio.remote_control import RemoteControl
+from harmonica_studio import service
 from workflow_fakes import ControlledExecutor, SilentScriptPlayer
 
 
@@ -23,8 +26,10 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.executor, self.audio, self.player = ControlledExecutor(), FakeAudio(), SilentScriptPlayer()
+        self.library_executor = ControlledExecutor()
         self.controller = AppController(self.root / 'data', audio=self.audio,
-                                        player=self.player, executor=self.executor)
+                                        player=self.player, executor=self.executor,
+                                        library_executor=self.library_executor)
         self.addCleanup(self.controller.close)
         self.remote = RemoteControl(self.controller)
         self.notes = [dict(pitch=60, start=0, end=.1, velocity=80),
@@ -44,6 +49,69 @@ class ControllerTests(unittest.TestCase):
             "assert not any(k.startswith('PySide6') for k in sys.modules)"],
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_workers_prepare_parts_and_maps_without_mutating_state_or_emitting_events(self):
+        c = self.controller
+        source = self.root / 'input.mid'
+        write_midi(self.notes, source)
+        owner = get_ident()
+        events, work = [], []
+        c.subscribe(lambda event, value: events.append((event, get_ident())))
+        original_rank, original_anchors = service.rank_parts, service.playback_anchors
+
+        def rank(*args):
+            work.append(('rank', get_ident()))
+            return original_rank(*args)
+
+        def anchors(*args):
+            work.append(('anchors', get_ident()))
+            return original_anchors(*args)
+
+        with patch.object(service, 'rank_parts', side_effect=rank), \
+                patch.object(service, 'playback_anchors', side_effect=anchors), \
+                ThreadPoolExecutor(max_workers=1) as pool:
+            c.load_file(source)
+            for kind in ('load', 'convert', 'export'):
+                if kind == 'convert':
+                    c.begin_convert()
+                elif kind == 'export':
+                    c.begin_export()
+                state = deepcopy(c.state)
+                calls = list(self.audio.calls)
+                events.clear()
+                pool.submit(self.executor.finish_next).result(timeout=5)
+                self.assertEqual(c.state, state)
+                self.assertEqual(self.audio.calls, calls)
+                self.assertEqual(events, [])
+                # Completed results need neither file readback nor map rebuilding.
+                with patch('harmonica_studio.controller.load_export_result', side_effect=AssertionError('readback')), \
+                        patch.object(c, 'set_time_anchors', side_effect=AssertionError('map rebuild')):
+                    c.poll()
+                self.assertTrue(events)
+                self.assertTrue(all(thread == owner for _, thread in events))
+        self.assertEqual([kind for kind, _ in work], ['rank', 'anchors', 'anchors'])
+        self.assertTrue(all(thread != owner for _, thread in work))
+        self.assertFalse(c.state.export_dirty)
+
+    def test_cancelled_load_does_not_rank_install_or_start_conversion(self):
+        c = self.controller
+        source = self.root / 'input.mid'
+        write_midi(self.notes, source)
+        c.load_file(source, prepare=True, autoplay=True)
+        original_read = service.read_midi
+
+        def read_then_cancel(*args):
+            result = original_read(*args)
+            c.jobs.cancel()
+            return result
+
+        with patch.object(service, 'read_midi', side_effect=read_then_cancel), \
+                patch.object(service, 'rank_parts', side_effect=AssertionError('ranking after cancel')):
+            self.finish()
+        self.assertFalse(c.busy)
+        self.assertEqual(c.state.parts, {})
+        self.assertIsNone(c.state.project)
+        self.assertFalse(self.audio.playing)
 
     def test_desktop_and_remote_share_transport_and_stop_pending_play(self):
         c = self.controller
@@ -177,7 +245,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_failed_shutdown_save_keeps_application_usable(self):
         c = self.controller
-        with patch('harmonica_studio.controller.save_project', side_effect=OSError('disk')):
+        with patch('harmonica_studio.save_coordinator.save_project', side_effect=OSError('disk')), self.assertLogs(level='ERROR'):
             with self.assertRaises(OSError):
                 c.close()
         self.assertFalse(c.state.closed)
@@ -193,6 +261,9 @@ class ControllerTests(unittest.TestCase):
         write_midi(self.notes, music / 'short.mid')
         c.update_preferences(replace(c.preferences, library_folder=str(music)))
         c.refresh_library()
+        while c.library_refreshing:
+            self.library_executor.finish_next()
+            c.poll()
         song = self.remote.snapshot()['library'][0]['id']
         self.assertTrue(self.remote.handle(dict(action='select', song_id=song, autoplay=True))['ok'])
         self.finish()

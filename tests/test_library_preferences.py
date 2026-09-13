@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import patch
 from harmonica_studio.library import sample_entries
@@ -14,6 +15,45 @@ class LibraryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_strict_scan_distinguishes_failure_from_missing_directory(self):
+        with patch.object(Path, 'iterdir', side_effect=PermissionError('denied')):
+            with self.assertRaises(PermissionError):
+                sample_entries(self.root, strict=True)
+        self.assertEqual(sample_entries(self.root / 'missing', strict=True), [])
+
+    def test_hashing_checks_cancellation_between_chunks(self):
+        path = self.root / 'large.mid'
+        path.write_bytes(b'x' * (2 * 1024 * 1024))
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        (self.root / 'catalog.json').write_text(json.dumps([dict(file=path.name, sha256=digest)]), encoding='utf-8')
+        cancel, reads = Event(), []
+        original_open = Path.open
+
+        class CancelAfterRead:
+            def __init__(self, file):
+                self.file = file
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.file.close()
+
+            def read(self, size):
+                reads.append(size)
+                raw = self.file.read(size)
+                cancel.set()
+                return raw
+
+        def open_file(candidate, *args, **kwargs):
+            file = original_open(candidate, *args, **kwargs)
+            return CancelAfterRead(file) if candidate == path else file
+
+        with patch.object(Path, 'open', open_file):
+            with self.assertRaises(InterruptedError):
+                sample_entries(self.root, cancel, strict=True)
+        self.assertEqual(reads, [64 * 1024])
 
     def test_files_appear_and_disappear_without_catalog_edits(self):
         (self.root/'新曲.MIDI').write_bytes(b'new')

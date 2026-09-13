@@ -2,7 +2,7 @@
 
 一个在 Windows 本机运行的 MIDI 工具：选取主旋律、简化多音、在音符图中修谱，导出单旋律 MIDI、AutoHotkey v2 脚本和试听 WAV。
 
-当前版本：**1.4.9**。包含钢琴音名与按键文字对齐修复、统一便携目录，以及测试和成品检查通过后才更新程序的打包流程。
+当前版本：**1.4.9**（源码）。便携版版本以实际程序和构建记录为准。
 
 旋律处理新增“连续旋律（兼顾前后音）”和可选的乐句八度适配：完整模式的“曲谱 → 调音”中选择后重新生成。声部推荐使用真实的音符重叠时间、覆盖情况、音程连续性等特征；连续旋律会比较候选路线，减少长音被伴奏打断。默认仍为长音保护，新模式请结合具体编曲对比试听。
 
@@ -74,35 +74,23 @@
 
 ## 工程结构
 
-开发和 agent 测试可使用 `launch.py diagnose` 测量加载、曲库刷新、自动保存及取消场景；支持真实 Qt 响应探针、可取消后台延迟、总超时和 JSON 报告。具体命令与指标解释见 [性能诊断](docs/diagnostics.md)。测试使用临时合成数据，不读取个人曲库或发送游戏按键。
+| 文档 | 阅读目的 |
+| --- | --- |
+| [协作指南](AGENTS.md) | agent 的执行规则、常用入口和交付要求 |
+| [应用架构](docs/architecture.md) | 模块职责、数据流、线程和状态边界 |
+| [性能诊断](docs/diagnostics.md) | diagnose 命令、参数、报告指标与注入接口 |
+| [第三方与来源](THIRD_PARTY.md) | 运行组件、曲目来源和许可说明 |
 
 ```text
-src/harmonica_studio/
-  midi.py          MIDI 读取、速度换算与写出
-  models.py        转换选项和校验
-  melody.py        声部推荐、旋律简化、移调
-  rests.py         从原谱派生长休止缩短后的播放音符
-  schedule.py      音高映射与按键时序
-  preview.py       时间表校验与 WAV 合成
-  service.py       原子导出与转换报告
-  project.py       可独立保存的工程格式与校验
-  editor.py        可编辑音符图、历史记录与定位
-  playback.py      试听和演奏器生命周期
-  transport.py     音频时间映射、进度插值与位置校正
-  gui.py           Qt 桌面界面
-  theme.py         四套纸色主题与共享调色板
-  preferences.py   曲库路径、主题、精简模式和长空白偏好
-  settings_ui.py   设置对话框与主题预览
-  storage.py       配置和轮转日志
-  diagnostics.py   无按键输入的成品检查
-  library.py       本地曲库扫描与可选资料校验
-  assets/          播放器模板与原创口琴图标
-tests/             单元与转换集成测试
-scripts/           测试与打包脚本
-samples/           13 首 MIDI、原始曲谱资料、可选目录与来源说明
-third_party/       AutoHotkey 官方运行程序及许可证
-app/               可直接运行的 Windows 便携版
-data/exports/      每次转换的完整导出目录
+src/harmonica_studio/  应用源码与 assets 运行资源
+tests/                单元、集成和 Qt 交互测试
+scripts/              测试、版本同步与打包入口
+docs/                 架构和诊断说明
+samples/              本地曲库与来源资料（源码仓库仅保留放置说明）
+third_party/          第三方组件的放置说明与许可证
+verification/         本地日志、专项验收及合并后的历史更新记录
+app/HarmonicaStudio/  完整便携版（本地构建生成）
+data/                 源码运行的个人数据（按需创建）
 ```
 
 ## 开发
@@ -117,10 +105,12 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -e .
 .venv\Scripts\python launch.py gui
 .\scripts\test.ps1 -Python .venv\Scripts\python.exe
-.\scripts\build.ps1 -Version 1.4.7
+.\scripts\build.ps1
 ```
 
 开发依赖来自 PyPI，运行及转换过程不联网。核心转换仅依赖标准库，GUI 使用 PySide6 Essentials。依赖版本锁定在 `requirements-build.txt`。
+
+配置好 `.venv` 后，可双击根目录的 **启动源码版.cmd** 运行当前源码，无需激活环境；**启动口琴工坊.cmd** 仍优先启动已打包的便携版。
 
 也可双击根目录的 **打包.cmd**，输入版本号；直接回车使用当前版本。脚本自动选择项目的 `.venv`，无需手动激活。命令行省略 `-Version` 可按当前版本重新打包，仍支持 `-Python` 和 `-DistPath`。
 
@@ -129,8 +119,6 @@ python -m venv .venv
 打包配置在 `HarmonicaStudio.spec`，通过相对工程路径定位资源。Qt 使用 Windows 自带 ICU；配置会排除部分 Python 发行版中同名但接口不兼容的 ICU，避免成品出现 DLL 入口缺失。
 
 原始图标为 `src/harmonica_studio/assets/studio.svg`；构建脚本会运行 `scripts/make_icon.py` 重新生成 PNG 和包含 16–256 像素尺寸的 ICO，并嵌入程序。构建完成后运行 `scripts/create_shortcut.ps1` 可在工程目录生成带图标的快捷方式。
-
-播放动画按约 60 Hz 更新，使用单调时钟对音频位置插值，再由播放器反馈校正；进度条以浮点位置绘制，避免整数像素步进影响观感。这只影响显示，导出的音符时间与按键编排不因动画频率改变。
 
 ## 命令行
 
@@ -154,8 +142,6 @@ python launch.py convert song.mid --track 1 --channel 2 --speed 0.8 --transpose 
 
 `scripts/test.ps1` 在安装 PySide6 时也会运行 Qt 鼠标、键盘交互测试；没有 Qt 时这些测试明确标为跳过，核心转换、工程和音频控制测试仍可运行。
 
-P1/P2 架构改造已通过 180 项单元与交互测试，无跳过或已知失败；包括不启动 Qt 的控制层测试。完整记录见 `verification/p1-p2-acceptance.md`；上述测试不代表游戏内实测。
-
-便携目录迁移记录见 `verification/portable-layout-acceptance.md`。旧运行数据经逐文件核对后迁入成品 `data`；历史构建副本不作为当前程序使用。
+当前检查结果以实际运行的测试和成品报告为准。本地 `verification/历史更新.md` 汇总旧版本短记录，并索引保留的专项验收；历史测试数量、数据迁移和发布描述不代表当前程序状态。日志、截图及本地报告不纳入源码版本管理。
 
 来源、第三方许可证与示例版权见 `THIRD_PARTY.md`。工程自身代码采用 MIT，第三方运行时与乐谱各自遵守原许可证。

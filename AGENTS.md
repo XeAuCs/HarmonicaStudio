@@ -19,6 +19,7 @@
 | `tests/` | 核心逻辑、集成及 Qt 交互测试 |
 | `scripts/` | 测试、版本同步、打包、成品检查和资源生成脚本 |
 | `docs/architecture.md` | 模块依赖、状态管理与生命周期约定 |
+| `docs/diagnostics.md` | `diagnose` 参数、耗时指标、JSON 协议和测试注入点 |
 | `samples/` | 源码运行曲库、首次打包的种子曲目及来源说明 |
 | `third_party/` | 随程序分发的第三方运行组件和许可证 |
 | `verification/` | 验证报告、日志和必要截图 |
@@ -32,6 +33,8 @@
 
 - `controller.py` 中的 `AppController` 统一处理业务变更；视图读取其状态。不要让桌面界面和手机接口各自实现一套业务流程。
 - `app_state.py` 管理应用状态；`jobs.py` 管理后台任务、取消及后续动作。接收后台结果时保留版本检查，避免旧任务覆盖新编辑。
+- `AppController` 的可选 `metrics` 由 `metrics.py` 收集耗时；`before_work(kind, cancel_event)` 仅在工作线程运行，默认均关闭。测试钩子不得修改应用状态或 Qt 控件，不向控制层加入阻塞主线程的延迟方法。
+- `performance.py` 通过隔离进程和真实控制层实现诊断 CLI；复用 `diagnostic_backends.py` 中的可控执行器、无按键演奏器及 `diagnostics.py` 的 `FakeAudio`，不另建一套业务或假后端实现。
 - `presenter.py` 适配桌面展示，`remote_control.py` 适配手机命令。网络线程不得直接修改 Qt 界面或应用状态。
 - `midi.py` 负责 MIDI 解析与写出；`melody.py` 负责声部推荐、旋律提取、移调与音域适配；`service.py` 组织转换和导出。
 - 核心转换逻辑保持独立于 Qt，便于命令行调用和隔离测试。
@@ -60,28 +63,33 @@
 
 # 旋律算法小规模对照和性能检查
 .\.venv\Scripts\python.exe scripts/evaluate_melody.py
+
+# 查看性能诊断入口（场景与参数见 docs/diagnostics.md）
+.\.venv\Scripts\python.exe launch.py diagnose --help
 ```
 
-首次准备开发环境时，使用可用的 Python 3.10+ 创建虚拟环境：
+首次搭建环境见 [README 的开发说明](README.md#开发)。
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\.venv\Scripts\python.exe -m pip install -e .
-```
+## 性能诊断与 agent 测试
+
+- 性能优化或涉及主线程、后台任务、保存流程的修改，先用 `diagnose` 留下基线，再按相同规模、模式、显示后端和重复次数串行复测；避免同时运行其他重任务。其他修改按受影响范围验证。
+- 使用临时合成数据和共用假后端；Qt 行为回归使用离屏模式，桌面响应测量使用系统显示后端。人工延迟和可控执行器用于顺序/取消验证，不作为真实性能数据。
+- 按 [性能诊断](docs/diagnostics.md) 设置超时、检查退出码及 JSON，区分同步耗时、后台耗时、轮询等待和界面延迟。失败、超时、缺少 Qt、样本丢弃不能算通过。
+- 原始报告存入 `verification/`；汇报环境、规模、重复次数及可比较的前后数据，不夸大少量样本或未控制缓存的结果。计时与 CLI 修改覆盖 `tests/test_performance.py`，任务变更同时保护取消、过期结果、自动播放和关闭行为。
+
+模块与线程现状以 [应用架构](docs/architecture.md) 为准；诊断命令、参数、指标和注入示例集中维护在 [性能诊断](docs/diagnostics.md)。
 
 ## 版本与打包
 
 统一使用现有一键入口，不再手工串联版本替换、PyInstaller、成品检查和临时目录清理。
 
 - 交互使用：双击根目录 `打包.cmd`，输入目标版本号；直接回车保留当前版本。
-- 命令行使用：`./scripts/build.ps1 -Version 1.4.8`，其中版本号按用户要求填写。
-- 按当前版本重打包：`./scripts/build.ps1`。
+- 命令行使用：`./scripts/build.ps1`，通过 `-Version` 指定用户要求的目标版本号。
 - 默认自动选择 `.venv/Scripts/python.exe`，支持通过 `-Python` 指定解释器、通过 `-DistPath` 指定输出父目录。
 
 脚本先检查目标程序是否正在运行，再按需同步版本，依次完成完整测试、打包、成品检查和安装。测试或成品检查失败时，不安装新程序。需要替换运行中的 EXE 时，让用户先保存并关闭程序，不强制结束进程。
 
-`scripts/set_version.py` 同步 `__init__.py`、`pyproject.toml`、`README.md` 和 `快速开始.txt` 中的当前版本声明；历史验收报告不改写。构建失败时源码可能已更新版本，旧 EXE 仍保留，不能把源码版本号当作已经发布成功的证据。
+`scripts/set_version.py` 同步 `__init__.py`、`pyproject.toml` 和 `README.md` 中的当前版本声明；历史验收报告不改写。构建失败时源码可能已更新版本，旧 EXE 仍保留，不能把源码版本号当作已经发布成功的证据。
 
 安装时保留已有曲库、设置、恢复记录、导出及其他用户文件。构建缓存和自测数据放在本次 `build/portable-stage-*` 中，结束后自动清理，日志写入 `verification/build.log`，报告与截图保存在 `verification/`。不要额外留下重复的便携版或长期备份。
 
@@ -104,4 +112,5 @@ python -m venv .venv
 - 变更说明写清问题、修改后的行为、验证结果与必要限制；界面变更附截图，关联相关问题。
 - 添加外部曲目或组件时更新来源说明和第三方许可证记录。
 - 不将生成的程序、构建缓存和用户数据纳入版本控制；不要把用户曲谱内容或敏感数据写入公开日志和报告。
+- 长期文档各司其职：本文件维护执行规则，`docs/architecture.md` 维护设计，`docs/diagnostics.md` 维护诊断操作。简短更新追加到 `verification/历史更新.md`，专项验收单独保留，避免为每次小调整新建说明文件。
 - 交付时说明修改的是源码还是已经更新的便携版，只报告实际完成的检查结果。

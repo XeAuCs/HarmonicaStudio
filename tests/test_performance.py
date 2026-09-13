@@ -127,6 +127,17 @@ class DiagnoseCLITests(unittest.TestCase):
         self.assertEqual(report['summary']['job.execute']['count'], 2)
         self.assertNotIn('ui.timer_lag', report['summary'])
 
+    def test_export_measures_worker_and_result_installation(self):
+        code, report = self.invoke('--scenario', 'export', '--notes', '12', '--repeat', '2')
+        self.assertEqual(code, 0, report)
+        self.assertTrue(report['ok'])
+        for metric in ('controller.show_result', 'controller.autosave'):
+            self.assertEqual(report['summary'][metric]['count'], 2)
+        self.assertEqual(report['summary']['job.execute']['count'], 4)
+        for run in report['runs']:
+            outcomes = [(s['kind'], s['outcome']) for s in run['metrics']['samples'] if s['name'] == 'job.result']
+            self.assertEqual(outcomes, [('export', 'ok'), ('save', 'ok')])
+
     def test_library_and_autosave_use_temporary_data_not_external_home(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -139,8 +150,24 @@ class DiagnoseCLITests(unittest.TestCase):
                         code, report = self.invoke('--scenario', scenario, '--notes', '12',
                                                    '--files', '3', '--repeat', '1')
                         self.assertEqual(code, 0, report)
+                        if scenario == 'library':
+                            self.assertEqual(report['summary']['controller.install_library']['count'], 1)
+                            self.assertEqual(report['summary']['job.execute']['count'], 1)
+                            outcomes = [s for s in report['runs'][0]['metrics']['samples'] if s['name'] == 'job.result']
+                            self.assertEqual([(s['kind'], s['outcome']) for s in outcomes], [('library', 'ok')])
             self.assertEqual(sentinel.read_text(encoding='utf-8'), 'personal data')
             self.assertEqual(list(root.iterdir()), [sentinel])
+
+    def test_qt_library_waits_for_requested_scan_and_excludes_startup_scan(self):
+        try:
+            import PySide6
+        except ImportError:
+            self.skipTest('PySide6 unavailable; Qt diagnostic not verified')
+        code, report = self.invoke('--scenario', 'library', '--notes', '12', '--files', '3',
+                                   '--repeat', '2', '--ui')
+        self.assertEqual(code, 0, report)
+        for metric in ('controller.refresh_library', 'controller.install_library', 'job.execute'):
+            self.assertEqual(report['summary'][metric]['count'], 2)
 
     def test_cancellation_interrupts_injected_delay_and_never_autoplays(self):
         code, report = self.invoke('--scenario', 'cancel', '--notes', '10', '--repeat', '1',
@@ -188,6 +215,9 @@ class DiagnoseCLITests(unittest.TestCase):
             self.assertGreater(report['summary']['ui.timer_lag']['count'], 0)
             self.assertEqual(report['summary']['controller.autosave']['count'], 1)
             self.assertEqual(report['summary']['controller.replace_notes']['count'], 1)
+            saved = [s for s in report['runs'][0]['metrics']['samples']
+                     if s['name'] == 'job.result' and s['kind'] == 'save']
+            self.assertEqual([(s['save_kind'], s['outcome']) for s in saved], [('auto', 'ok')])
 
 
 if __name__ == '__main__':

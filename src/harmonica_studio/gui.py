@@ -171,17 +171,30 @@ class MainWindow(QMainWindow):
         self.remote_control = RemoteControl(self.controller, blocked=lambda: QApplication.activeModalWidget() is not None)
         self.remote_timer = QTimer(self)
         self.remote_timer.timeout.connect(self.poll_remote)
-        self.refresh_library();self.apply_theme(self.controller.preferences.theme);self.set_compact(self.controller.preferences.compact,initial=True);self.refresh_controls()
+        self._library_render_pending=False
+        self.sample_menu.aboutToHide.connect(self.library_menu_hidden)
+        self.render_library();self.refresh_library();self.apply_theme(self.controller.preferences.theme);self.set_compact(self.controller.preferences.compact,initial=True);self.refresh_controls()
 
 
     def library_root(self):
         return self.controller.library_root()
 
     def refresh_library(self):
-        self.controller.refresh_library()
+        self.presenter.invoke(self.controller.refresh_library)
+
+    def library_menu_hidden(self):
+        if self._library_render_pending:
+            QTimer.singleShot(0,self.render_library)
 
     def render_library(self):
-        folder=self.library_root();entries=self.controller.library;self.sample_menu.clear();self.library_actions=[]
+        if self.controller.state.closed:return
+        # Keep actions stable while the user is choosing from an open menu.
+        if self.sample_menu.isVisible():
+            self._library_render_pending=True
+            return
+        self._library_render_pending=False
+        folder=self.controller.state.library_root or self.library_root()
+        entries=self.controller.library;self.sample_menu.clear();self.library_actions=[]
         for entry in entries:
             text=entry['title'];duration=entry.get('duration_seconds')
             if type(duration) in (int,float):text+=f'  /  {duration:.0f} 秒'
@@ -197,6 +210,9 @@ class MainWindow(QMainWindow):
         self.sample_menu.addAction('曲库设置…',self.open_settings)
         self.example_button.setText(f'曲库 · {len(entries)}')
         self.example_button.setToolTip('自动扫描：'+str(folder))
+
+    def watch_library(self):
+        folder=self.library_root()
         watched=self.library_watcher.directories()
         target=folder.resolve()
         while not target.is_dir() and target.parent!=target:target=target.parent
@@ -222,9 +238,10 @@ class MainWindow(QMainWindow):
         dialog.themePreview.connect(self.apply_theme)
         if dialog.exec() == QDialog.Accepted:
             try:
+                previous_folder=self.controller.preferences.library_folder
                 self.controller.update_preferences(dialog.preferences())
                 self.apply_theme(self.controller.preferences.theme)
-                self.refresh_library()
+                if self.controller.preferences.library_folder==previous_folder:self.refresh_library()
                 self.set_compact(self.controller.preferences.compact)
             except Exception as exc:
                 self.apply_theme(self.controller.preferences.theme)
@@ -263,8 +280,9 @@ class MainWindow(QMainWindow):
             self.animation_timer.stop()
         for widget in (self.open_button, self.example_button, self.project_button, self.table,
                        self.speed, self.transpose, self.mode, self.octave, self.phrase_octave, self.trim):
-            widget.setEnabled(not busy)
-        self.restore_button.setEnabled(not busy and (c.home / 'autosave.hstudio').is_file())
+            widget.setEnabled(caps['can_open'])
+        self.settings_button.setEnabled(s.transition is None)
+        self.restore_button.setEnabled(caps['can_open'] and (c.home / 'autosave.hstudio').is_file())
         self.convert_button.setEnabled(caps['can_convert'])
         self.cancel_button.setEnabled(busy and c.jobs.current.kind in ('convert', 'export'))
         self.cancel_button.setVisible(busy)
@@ -272,7 +290,7 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(caps['can_save'])
         self.export_button.setEnabled(caps['can_export'])
         retry = self.compact and bool(s.parts) and s.project is None
-        self.listen_button.setEnabled((caps['can_play'] or (retry and not busy)) and not playing)
+        self.listen_button.setEnabled((caps['can_play'] or (retry and caps['can_open'])) and not playing)
         self.listen_button.setText('重新生成' if retry else '继续试听' if s.transport == 'paused' else '试听')
         self.pause_button.setEnabled(playing)
         self.quiet_button.setEnabled(has or busy)
@@ -342,7 +360,7 @@ class MainWindow(QMainWindow):
             self.presenter.invoke(self.controller.open_project, path)
 
     def save_current(self):
-        if self.controller.state.project is None or self.controller.jobs.current:return
+        if not self.controller.capabilities()['can_save']:return
         path,_=QFileDialog.getSaveFileName(self,'保存口琴工程',str(self.controller.state.project_path or self.controller.home/'曲谱.hstudio'),'口琴工程 (*.hstudio)')
         if path:
             try:self.save_to(path)
@@ -490,7 +508,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            self.controller.close()
+            if not self.controller.close(wait=False):
+                event.ignore()
+                return
         except Exception as exc:
             self.show_error(exc)
             event.ignore()
@@ -503,6 +523,9 @@ class MainWindow(QMainWindow):
         if self.library_watcher.directories():
             self.library_watcher.removePaths(self.library_watcher.directories())
         event.accept()
+
+    def finish_close(self):
+        QTimer.singleShot(0,self.close)
 
 def run(open_remote=False):
     # A stable Windows identity allows the taskbar to display our application icon.

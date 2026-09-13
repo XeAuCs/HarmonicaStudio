@@ -88,10 +88,11 @@ def self_test(report_path):
         save_preferences(home/'preferences.json',Preferences(library_folder=str(music)))
         def create_window():
             window=MainWindow(home=home,audio=FakeAudio());window.show_error=lambda exc:errors.append(str(exc))
-            windows.append(window);window.show();app.processEvents();return window
+            windows.append(window);window.show();finish(window);return window
         def finish(window,allow_errors=False):
             deadline=time.monotonic()+90
-            while window.controller.jobs.current is not None:
+            while (window.controller.jobs.current is not None or window.controller.library_refreshing
+                   or window.controller.saving or window.controller.state.transition is not None):
                 if time.monotonic()>deadline:raise TimeoutError('界面任务超时。')
                 app.processEvents();window.poll()
                 if errors and not allow_errors:raise AssertionError(errors)
@@ -172,7 +173,7 @@ def self_test(report_path):
         # The project must reopen and export with an unavailable source MIDI.
         missing_source=home/'original-midi-no-longer-present.mid';assert not missing_source.exists()
         window.controller.state.project['source']={'path':str(missing_source)}
-        saved=home/'修订后的欢乐颂.hstudio';window.save_to(saved)
+        saved=home/'修订后的欢乐颂.hstudio';window.save_to(saved);finish(window)
         assert load_project(saved)['notes']==edited_notes and not window.controller.state.project_dirty
         window.open_project(saved);assert not errors,errors
         assert window.controller.state.source is None and not window.controller.state.parts and window.controller.state.result is None
@@ -261,7 +262,7 @@ def self_test(report_path):
         window.listen_button.click();window.seek_editor(16.0);window.poll();app.processEvents();assert_centered(window.roll)
         screenshot=report_path.with_suffix('.png');assert window.grab().save(str(screenshot))
         assert window.arm_button.isEnabled() and window.folder_button.isEnabled()
-        window.close();app.processEvents();assert window.controller.audio.path is None and not window.controller.audio.playing
+        window.close();finish(window);assert window.controller.audio.path is None and not window.controller.audio.playing
         restored=create_window();assert restored.restore_button.isEnabled();restored.restore_button.click()
         assert restored.controller.state.project['notes']==edited_notes and restored.roll.get_notes()==edited_notes
         assert restored.controller.state.source is None and not restored.controller.state.project_dirty
@@ -412,7 +413,7 @@ def self_test(report_path):
         checks.extend(['continuous extraction preserves sustained melody over lower accompaniment',
                        'phrase octave controls retain wide phrases and persist conversion settings',
                        'phrase changes are visible and exported with playable MIDI and AHK'])
-        restored.close();app.processEvents()
+        restored.close();finish(restored)
         checks.extend(['autosave restores edited score in a new window',
             'rendered current editor and playback cursor','window close releases audio'])
         result=dict(ok=True,report=report,export=str(repeated_folder),project=str(saved),
@@ -421,7 +422,7 @@ def self_test(report_path):
         result=dict(ok=False,error=traceback.format_exc(),ui_errors=errors,checks=checks);code=1
     finally:
         for window in windows:
-            try:window.close()
+            try:window.controller.close();window.close()
             except BaseException:pass
         if app is not None:app.processEvents()
     report_path.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')

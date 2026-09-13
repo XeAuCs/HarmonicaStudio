@@ -87,7 +87,10 @@ class RemoteControl:
                     song_id=song_id(s.source) if s.source else None, transport=s.transport.value,
                     position=position, duration=duration, busy=c.busy, status=s.message,
                     theme=c.preferences.theme, palette=theme_palette(c.preferences.theme), library=library,
-                    can_play=c.capabilities()['can_play'], game=game, score_id=score['id'])
+                    can_play=c.capabilities()['can_play'], game=game, score_id=score['id'],
+                    library_refreshing=c.library_refreshing, library_revision=s.library_revision,
+                    library_error='曲库刷新失败，请检查电脑端状态。' if s.library_error else '',
+                    saving=c.saving, transition=s.transition)
 
     def score_snapshot(self):
         c, s = self.controller, self.controller.state
@@ -120,19 +123,19 @@ class RemoteControl:
             return {'ok': False, 'message': '电脑已关闭。'}
         if self.blocked() and action not in ('stop', 'game_stop'):
             return {'ok': False, 'message': '电脑上有对话框等待处理，请先关闭。'}
-        if c.busy and action not in ('stop', 'game_stop', 'refresh'):
-            return {'ok': False, 'message': '曲谱正在准备，请稍候。'}
+        if (c.busy or c.state.transition is not None) and action not in ('stop', 'game_stop', 'refresh'):
+            return {'ok': False, 'message': '正在保存当前工程，请稍候。' if c.state.transition else '曲谱正在准备，请稍候。'}
         try:
             if action == 'select':
                 entry = next((e for e in c.library if song_id(e['path']) == command['song_id']), None)
                 if not entry or not entry['path'].is_file():
-                    c.refresh_library()
+                    c.refresh_library(remote=True)
                     return {'ok': False, 'message': '这首歌已不在曲库中，请刷新。'}
                 c.load_file(entry['path'], entry.get('options'), prepare=True,
                             autoplay=command.get('autoplay', False), remote=True)
             elif action == 'refresh':
-                c.refresh_library()
-                c.status('曲库已刷新。')
+                c.refresh_library(remote=True)
+                return {'ok': True, 'message': '正在刷新曲库…'}
             elif action in ('play', 'game_play'):
                 if not c.state.has_notes:
                     return {'ok': False, 'message': '请先从曲库选择歌曲。'}

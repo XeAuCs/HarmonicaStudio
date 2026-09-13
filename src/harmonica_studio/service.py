@@ -1,20 +1,81 @@
 """Transactional conversion; no input injection and no network access."""
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from datetime import datetime
 import hashlib, json, logging, re, shutil, uuid
 from . import __version__
 from .midi import read_midi, write_midi
-from .melody import prepare
+from .melody import prepare, rank_parts
 from .models import Options
 from .schedule import build_events
 from .preview import decode_events, render_wav
 from .paths import template_path
-from .project import make_project, validate_project, save_project
+from .project import make_project, validate_project, save_project, load_project
 from .rests import compress_long_rests
+from .transport import TimeMap, playback_anchors
+
+
+@dataclass(frozen=True)
+class LoadedParts:
+    parts: dict
+    names: dict
+    keys: list
+
+
+@dataclass(frozen=True)
+class PreparedExport:
+    """Worker-owned data transferred to the controller after completion.
+
+    Nested values are independent of the input project, not deeply immutable.
+    The worker must not touch them after returning the result.
+    """
+    folder: Path
+    report: dict
+    project: dict
+    actual: list
+    anchors: list
+    to_audio: TimeMap
+    to_score: TimeMap
+
+
+def _check_cancel(cancel):
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError('转换已取消。')
+
+
+def load_ranked_midi(source, cancel=None):
+    _check_cancel(cancel)
+    parts, names = read_midi(source)
+    _check_cancel(cancel)
+    keys = [key for key, _ in rank_parts(parts, names)]
+    _check_cancel(cancel)
+    return LoadedParts(parts, names, keys)
+
+
+def _prepare_export(folder, report, project, actual):
+    anchors = playback_anchors(project['notes'], actual)
+    return PreparedExport(Path(folder), report, project, actual, anchors,
+                          TimeMap(anchors), TimeMap((b, a) for a, b in anchors))
+
+
+def load_export_result(folder, report):
+    """Compatibility entry for explicitly opening existing export artifacts."""
+    folder = Path(folder)
+    project = load_project(folder / '工程.hstudio')
+    actual = json.loads((folder / '音符.json').read_text(encoding='utf-8'))
+    return _prepare_export(folder, report, project, actual)
 
 
 def convert(source, output_root, options=None, cancel=None):
+    """CLI-compatible full export returning (folder, report)."""
+    return _convert(source, output_root, options, cancel, prepared=False)
+
+
+def convert_prepared(source, output_root, options=None, cancel=None):
+    return _convert(source, output_root, options, cancel, prepared=True)
+
+
+def _convert(source, output_root, options, cancel, *, prepared):
     options = options or Options()
     options.validate()
     source, output_root = Path(source).resolve(), Path(output_root).resolve()
@@ -24,7 +85,7 @@ def convert(source, output_root, options=None, cancel=None):
     report.update(source=str(source), source_sha256=source_hash, options=asdict(options))
     project = make_project(notes, source.stem, source={'path': str(source), 'sha256': source_hash},
                            options=asdict(options), report=report)
-    return _export(project, output_root, cancel, 'midi_conversion')
+    return _export(project, output_root, cancel, 'midi_conversion', prepared=prepared)
 
 
 def export_project(project, output_root, cancel=None):
@@ -32,7 +93,11 @@ def export_project(project, output_root, cancel=None):
     return _export(project, output_root, cancel, 'edited_project')
 
 
-def _export(project, output_root, cancel, export_type):
+def export_project_prepared(project, output_root, cancel=None):
+    return _export(project, output_root, cancel, 'edited_project', prepared=True)
+
+
+def _export(project, output_root, cancel, export_type, *, prepared=False):
     project = validate_project(project)
     notes = project['notes']
     if not notes:
@@ -77,11 +142,12 @@ def _export(project, output_root, cancel, export_type):
         project['report'] = report
         save_project(temp/'工程.hstudio', project)
         render_wav(events,temp/'试听.wav',cancel)
+        result = _prepare_export(folder, report, project, actual) if prepared else (folder, report)
         if cancel and cancel.is_set():
             raise InterruptedError('转换已取消。')
         temp.rename(folder)
         logging.info('Exported %s: %s',project['title'],report)
-        return folder, report
+        return result
     except BaseException:
         # Only remove the fresh staging directory owned by this invocation.
         assert temp.parent == output_root and temp.name.startswith('.partial-')

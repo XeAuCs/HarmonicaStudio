@@ -10,6 +10,8 @@ class JobKind(str, Enum):
     LOAD = 'load'
     CONVERT = 'convert'
     EXPORT = 'export'
+    LIBRARY = 'library'
+    SAVE = 'save'
 
 
 @dataclass

@@ -20,7 +20,7 @@ else:
     from harmonica_studio.gui import MainWindow
     QT_AVAILABLE = True
 
-from workflow_fakes import ControlledExecutor, SilentScriptPlayer
+from workflow_fakes import ControlledExecutor, SilentScriptPlayer, finish_saves
 from harmonica_studio.controller import AppController
 from harmonica_studio.diagnostics import FakeAudio
 from harmonica_studio.midi import write_midi
@@ -47,6 +47,8 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.music.mkdir()
         save_preferences(self.home / 'preferences.json', Preferences(library_folder=str(self.music)))
         self.executor = ControlledExecutor()
+        self.library_executor = ControlledExecutor()
+        self.save_executor = ControlledExecutor()
         self.audio = FakeAudio()
         self.player = SilentScriptPlayer()
         self.warnings = []
@@ -55,12 +57,16 @@ class WorkflowRegressionTests(unittest.TestCase):
         warning.start()
         self.addCleanup(warning.stop)
         self.window = MainWindow(controller=AppController(self.home, audio=self.audio,
-                                                         player=self.player, executor=self.executor))
+                                                         player=self.player, executor=self.executor,
+                                                         library_executor=self.library_executor,
+                                                         save_executor=self.save_executor))
         self.addCleanup(self.close_window)
         self.window.show()
         self.app.processEvents()
         self.window.timer.stop()
         self.window.library_timer.stop()
+        self.library_executor.finish_next()
+        self.window.poll()
         self.notes = [dict(pitch=60, start=0, end=.1, velocity=80),
                       dict(pitch=62, start=.2, end=.3, velocity=90)]
         self.source = self.root / 'original.hstudio'
@@ -73,14 +79,18 @@ class WorkflowRegressionTests(unittest.TestCase):
                          'Unexpected user-facing errors: ' + repr(self.warnings))
 
     def close_window(self):
+        self.window.controller.close(wait=False)
+        finish_saves(self.window.controller, self.save_executor)
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
 
     def finish_next(self):
+        finish_saves(self.window.controller, self.save_executor)
         self.assertTrue(self.executor.pending, 'Expected a submitted background job')
         self.executor.finish_next()
         self.window.poll()
+        finish_saves(self.window.controller, self.save_executor)
         self.window.animation_timer.stop()
 
     def remote(self, action, **parameters):
@@ -106,6 +116,7 @@ class WorkflowRegressionTests(unittest.TestCase):
         edited = self.edit_pitch()
         destination = self.root / 'saved.hstudio'
         self.window.save_to(destination)
+        finish_saves(self.window.controller, self.save_executor)
         self.assertEqual(load_project(destination)['notes'], edited)
         self.assertFalse(self.window.controller.state.project_dirty)
         self.assertTrue(self.window.controller.state.export_dirty)
@@ -116,6 +127,31 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertTrue(self.audio.playing)
         self.assertNotEqual(self.window.controller.state.result[0], old_folder)
         self.assertEqual(load_project(old_folder / '工程.hstudio')['notes'], self.notes)
+
+    def test_background_refresh_preserves_actions_until_open_menu_closes(self):
+        window = self.window
+        write_midi(self.notes, self.music / 'first.mid')
+        window.refresh_library()
+        self.library_executor.finish_next()
+        window.poll()
+        action = window.library_actions[0]
+        window.sample_menu.popup(window.example_button.mapToGlobal(window.example_button.rect().bottomLeft()))
+        try:
+            self.assertTrue(window.sample_menu.isVisible())
+            write_midi(self.notes, self.music / 'second.mid')
+            self.library_executor.finish_next()
+            window.poll()
+            self.assertEqual(len(window.controller.library), 2)
+            self.assertEqual(window.library_actions, [action])
+            self.assertTrue(window._library_render_pending)
+            self.assertTrue(window.save_button.isEnabled())
+            self.assertTrue(window.listen_button.isEnabled())
+        finally:
+            window.sample_menu.hide()
+            self.app.processEvents()
+            window.library_timer.stop()
+        self.assertEqual(len(window.library_actions), 2)
+        self.assertFalse(window._library_render_pending)
 
     def test_export_does_not_mark_unsaved_edits_as_manually_saved(self):
         edited = self.edit_pitch()
@@ -159,6 +195,8 @@ class WorkflowRegressionTests(unittest.TestCase):
     def check_stop_during_selection(self, finish_load_first):
         write_midi(self.notes, self.music / '短曲.mid')
         self.window.refresh_library()
+        self.library_executor.finish_next()
+        self.window.poll()
         song = self.window.remote_snapshot()['library'][0]['id']
         self.remote('select', song_id=song, autoplay=True)
         if finish_load_first:
@@ -215,14 +253,17 @@ class WorkflowRegressionTests(unittest.TestCase):
     def test_failed_manual_save_preserves_previous_file_and_unsaved_state(self):
         original = self.source.read_bytes()
         edited = self.edit_pitch()
+        self.expected_warning_count = 1
         with patch('harmonica_studio.project.Path.replace', side_effect=PermissionError('locked')):
-            with self.assertRaises(PermissionError):
+            with self.assertLogs(level='ERROR'):
                 self.window.save_to(self.source)
+                finish_saves(self.window.controller, self.save_executor)
         self.assertEqual(self.source.read_bytes(), original)
         self.assertEqual(list(self.root.glob('.*.tmp')), [])
         self.assertEqual(self.window.controller.state.project['notes'], edited)
         self.assertTrue(self.window.controller.state.project_dirty)
         self.window.save_to(self.source)
+        finish_saves(self.window.controller, self.save_executor)
         self.assertEqual(load_project(self.source)['notes'], edited)
 
     def test_switching_documents_preserves_unsaved_work_in_recovery(self):
@@ -230,6 +271,7 @@ class WorkflowRegressionTests(unittest.TestCase):
         other = self.root / 'other.hstudio'
         save_project(other, make_project([], '空工程'))
         self.window.open_project(other)
+        finish_saves(self.window.controller, self.save_executor)
         recovery = list((self.home / 'recovery').glob('*.hstudio'))
         self.assertEqual(len(recovery), 1)
         self.assertEqual(load_project(recovery[0])['notes'], edited)
@@ -254,11 +296,30 @@ class WorkflowRegressionTests(unittest.TestCase):
         edited = self.edit_pitch()
         self.window.listen_button.click()
         self.assertTrue(self.executor.pending)
-        self.assertTrue(self.window.close())
+        self.assertFalse(self.window.close())
+        finish_saves(self.window.controller, self.save_executor)
+        self.assertTrue(self.window.controller.state.closed)
         self.assertEqual(load_project(self.home / 'autosave.hstudio')['notes'], edited)
         self.assertFalse(self.executor.pending)
         self.assert_not_played()
         self.assertFalse((self.home / 'exports').exists())
+
+    def test_async_close_failure_keeps_window_and_restores_editing(self):
+        self.edit_pitch()
+        self.expected_warning_count = 1
+        self.assertFalse(self.window.close())
+        self.assertFalse(self.window.save_button.isEnabled())
+        self.assertFalse(self.window.open_button.isEnabled())
+        self.app.processEvents()
+        self.assertTrue(self.window.isVisible())
+        with patch('harmonica_studio.save_coordinator.save_project', side_effect=OSError('disk')), \
+                self.assertLogs(level='ERROR'):
+            finish_saves(self.window.controller, self.save_executor)
+        self.assertFalse(self.window.controller.state.closed)
+        self.assertTrue(self.window.controller.state.project_dirty)
+        self.assertTrue(self.window.save_button.isEnabled())
+        self.assertTrue(self.window.open_button.isEnabled())
+        self.assertTrue(self.window.isVisible())
 
 
 if __name__ == '__main__':

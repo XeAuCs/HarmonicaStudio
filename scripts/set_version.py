@@ -1,4 +1,4 @@
-"""Update the four current-version declarations, leaving historical reports alone."""
+"""Update current-version declarations, leaving historical reports alone."""
 from pathlib import Path
 import re
 import sys
@@ -11,7 +11,6 @@ def set_version(root, version):
         'src/harmonica_studio/__init__.py': rb"(?m)^(__version__ = ')[^']+(')",
         'pyproject.toml': rb'(?m)^(version = ")[^"]+(")',
         'README.md': '当前版本：\\*\\*[^*]+\\*\\*'.encode(),
-        '快速开始.txt': rb'(?m)^(.*Harmonica Studio )\d+\.\d+\.\d+(\r?$)',
     }
     changes = []
     for name, pattern in patterns.items():

@@ -18,7 +18,6 @@ class SetVersionTests(unittest.TestCase):
             'src/harmonica_studio/__init__.py': "__version__ = '1.4.7'\r\n",
             'pyproject.toml': '[project]\r\nversion = "1.4.7"\r\n',
             'README.md': '当前版本：**1.4.7**。\r\n历史版本 1.4.7 保持原样。\r\n',
-            '快速开始.txt': '口琴工坊 · Harmonica Studio 1.4.7\r\n',
         }
         for name, text in self.contents.items():
             path = self.root/name

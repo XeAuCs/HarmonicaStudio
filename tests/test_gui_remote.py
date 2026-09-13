@@ -40,10 +40,11 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
         self.window=MainWindow(home=self.root/'data', audio=FakeAudio())
         self.window.controller.player=FakeScriptPlayer();self.window.show()
         self.pool=ThreadPoolExecutor(max_workers=2)
+        self.wait_for(lambda:not self.window.controller.library_refreshing)
         self.server=self.window.start_remote(host='127.0.0.1',port=0)
     def tearDown(self):
-        self.wait_for(lambda:self.window.controller.jobs.current is None)
-        self.window.close();self.app.processEvents();self.pool.shutdown();self.temp.cleanup()
+        self.wait_for(lambda:self.window.controller.jobs.current is None and not self.window.controller.library_refreshing)
+        self.window.controller.close();self.window.close();self.app.processEvents();self.pool.shutdown();self.temp.cleanup()
     def wait_for(self, condition):
         deadline=time.monotonic()+20
         while not condition():
@@ -62,7 +63,7 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
     def select(self, autoplay=False):
         state=self.request();song=state['library'][0]
         self.assertTrue(self.request({'action':'select','song_id':song['id'],'autoplay':autoplay})['ok'])
-        self.wait_for(lambda:self.window.controller.jobs.current is None)
+        self.wait_for(lambda:self.window.controller.jobs.current is None and self.window.controller.state.transition is None)
         self.assertIsNotNone(self.window.controller.state.project)
         self.window.poll_remote()
     def test_phone_select_prepares_full_mode_and_transport_controls_desktop(self):
@@ -170,5 +171,7 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
         self.window.begin_export();self.wait_for(lambda:self.window.controller.jobs.current is None);self.window.poll_remote()
         exported=self.request(path='/api/score')
         self.assertNotEqual(exported['id'],edited['id'])
-        self.window.load_file(self.root/'music/手机试播.mid');self.window.poll_remote()
+        self.window.load_file(self.root/'music/手机试播.mid')
+        self.wait_for(lambda:self.window.controller.state.transition is None)
+        self.window.poll_remote()
         self.assertEqual(self.request(path='/api/score')['notes'],[])

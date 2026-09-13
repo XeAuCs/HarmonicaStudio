@@ -15,7 +15,7 @@ import time
 from . import __version__
 from .metrics import MetricsRecorder, summarize
 
-SCENARIOS = ('load', 'library', 'autosave', 'cancel')
+SCENARIOS = ('load', 'library', 'autosave', 'cancel', 'export')
 
 
 class WorkerDelay:
@@ -91,7 +91,7 @@ def validate_config(config):
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f'{name} 须在 {low} 至 {high} 之间。')
     if config['worker_delay_ms'] and config['scenario'] not in ('load', 'cancel'):
-        raise ValueError('后台延迟仅适用于 load 和 cancel 场景；保存和扫描目前是同步操作。')
+        raise ValueError('后台延迟仅适用于 load 和 cancel 场景。')
     threshold = config.get('max_ui_lag_ms')
     if threshold is not None and (not config['ui'] or not math.isfinite(threshold) or threshold <= 0):
         raise ValueError('界面延迟阈值须为正数，并同时启用 --ui。')
@@ -232,6 +232,8 @@ def _run_once(root, config, app):
             next_poll = now + .1
         if errors:
             raise RuntimeError('控制层操作失败：' + errors[0])
+        if controller.state.save_error:
+            raise RuntimeError('工程保存失败。')
         time.sleep(.001)
 
     def wait_until(predicate):
@@ -248,11 +250,13 @@ def _run_once(root, config, app):
             window = MainWindow(controller=controller)
             window.show_error = lambda exc: None
             window.show()
-        if config['scenario'] in ('autosave', 'cancel'):
+            # Startup scans are setup work, including any coalesced watcher request.
+            wait_until(lambda: not controller.library_refreshing)
+        if config['scenario'] in ('autosave', 'cancel', 'export'):
             controller.open_project(project)
         drain(.04)
         metrics = MetricsRecorder()
-        controller.metrics = controller.jobs.metrics = metrics
+        controller.metrics = controller.jobs.metrics = controller.library_scanner.jobs.metrics = controller.saves.jobs.metrics = metrics
         if app is not None:
             probe = QtLagProbe(metrics)
             drain(.025)
@@ -264,7 +268,8 @@ def _run_once(root, config, app):
             if sum(map(len, controller.state.parts.values())) != config['notes']:
                 raise AssertionError('加载后的音符数量不一致。')
         elif scenario == 'library':
-            controller.refresh_library()
+            generation = controller.refresh_library()
+            wait_until(lambda: controller.state.library_revision >= generation and not controller.library_refreshing)
             if len(controller.library) != config['files']:
                 raise AssertionError('扫描后的曲库数量不一致。')
         elif scenario == 'autosave':
@@ -272,10 +277,24 @@ def _run_once(root, config, app):
             edited[0]['pitch'] = 72
             if window is not None:
                 window.roll._commit(edited)
-                wait_until(lambda: (home / 'autosave.hstudio').exists())
             else:
                 controller.replace_notes(edited)
                 controller.autosave()
+            wait_until(lambda: controller.state.autosave_revision == controller.state.revision and not controller.saving)
+        elif scenario == 'export':
+            controller.begin_export()
+            wait_until(lambda: not controller.busy)
+            wait_until(lambda: not controller.saving)
+            if controller.state.result is None or controller.state.export_dirty:
+                raise AssertionError('导出结果未安装。')
+            folder = controller.state.result[0]
+            if load_project(folder / '工程.hstudio')['notes'] != notes:
+                raise AssertionError('导出改变了原始曲谱。')
+            actual = json.loads((folder / '音符.json').read_text(encoding='utf-8'))
+            if [n['pitch'] for n in actual] != [n['pitch'] for n in notes]:
+                raise AssertionError('导出发声音符不一致。')
+            if controller.audio.path != folder / '试听.wav' or controller.audio.playing:
+                raise AssertionError('导出未加载试听或意外自动播放。')
         else:
             controller.listen()
             wait_until(delay.started.is_set)
@@ -293,7 +312,7 @@ def _run_once(root, config, app):
         if probe is not None:
             probe.stop()
         snapshot = metrics.snapshot()
-        controller.metrics = controller.jobs.metrics = None
+        controller.metrics = controller.jobs.metrics = controller.library_scanner.jobs.metrics = controller.saves.jobs.metrics = None
         if scenario == 'autosave':
             if load_project(home / 'autosave.hstudio')['notes'] != edited or not controller.state.project_dirty:
                 raise AssertionError('自动保存的内容或手动保存状态错误。')
@@ -303,11 +322,13 @@ def _run_once(root, config, app):
     finally:
         if probe is not None:
             probe.stop()
-        controller.metrics = controller.jobs.metrics = None
+        controller.metrics = controller.jobs.metrics = controller.library_scanner.jobs.metrics = controller.saves.jobs.metrics = None
         try:
             controller.close()
         finally:
             controller.jobs.close()
+            controller.library_scanner.close()
+            controller.saves.close()
             if window is not None:
                 from PySide6.QtCore import QCoreApplication, QEvent
                 window.close()
@@ -315,6 +336,8 @@ def _run_once(root, config, app):
                 QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
                 app.processEvents()
             controller.jobs.executor.shutdown(wait=True, cancel_futures=True)
+            controller.library_scanner.jobs.executor.shutdown(wait=True, cancel_futures=True)
+            controller.saves.jobs.executor.shutdown(wait=True, cancel_futures=True)
 
 
 def run_worker(config):
