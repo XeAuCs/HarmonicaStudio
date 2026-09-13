@@ -38,11 +38,11 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
         shutil.copyfile(resource_root()/'samples/欢乐颂.mid', library/'手机试播.mid')
         save_preferences(self.root/'data/preferences.json', Preferences(library_folder=str(library)))
         self.window=MainWindow(home=self.root/'data', audio=FakeAudio())
-        self.window.player=FakeScriptPlayer();self.window.show()
+        self.window.controller.player=FakeScriptPlayer();self.window.show()
         self.pool=ThreadPoolExecutor(max_workers=2)
         self.server=self.window.start_remote(host='127.0.0.1',port=0)
     def tearDown(self):
-        self.wait_for(lambda:self.window.future is None)
+        self.wait_for(lambda:self.window.controller.jobs.current is None)
         self.window.close();self.app.processEvents();self.pool.shutdown();self.temp.cleanup()
     def wait_for(self, condition):
         deadline=time.monotonic()+20
@@ -62,18 +62,18 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
     def select(self, autoplay=False):
         state=self.request();song=state['library'][0]
         self.assertTrue(self.request({'action':'select','song_id':song['id'],'autoplay':autoplay})['ok'])
-        self.wait_for(lambda:self.window.future is None)
-        self.assertIsNotNone(self.window.project)
+        self.wait_for(lambda:self.window.controller.jobs.current is None)
+        self.assertIsNotNone(self.window.controller.state.project)
         self.window.poll_remote()
     def test_phone_select_prepares_full_mode_and_transport_controls_desktop(self):
         self.assertFalse(self.window.compact)
-        self.select();self.assertEqual(self.window.transport,'ready')
-        self.assertTrue(self.request({'action':'play'})['ok']);self.assertTrue(self.window.audio.playing)
-        self.request({'action':'seek','position':7.5});self.assertAlmostEqual(self.window.audio.position,7.5)
-        self.request({'action':'pause'});self.assertEqual(self.window.transport,'paused')
-        self.request({'action':'play'});self.assertEqual(self.window.transport,'playing')
-        self.request({'action':'stop'});self.assertEqual(self.window.audio.position,0)
-        self.assertFalse(self.window.audio.playing)
+        self.select();self.assertEqual(self.window.controller.state.transport,'ready')
+        self.assertTrue(self.request({'action':'play'})['ok']);self.assertTrue(self.window.controller.audio.playing)
+        self.request({'action':'seek','position':7.5});self.assertAlmostEqual(self.window.controller.audio.position,7.5)
+        self.request({'action':'pause'});self.assertEqual(self.window.controller.state.transport,'paused')
+        self.request({'action':'play'});self.assertEqual(self.window.controller.state.transport,'playing')
+        self.request({'action':'stop'});self.assertEqual(self.window.controller.audio.position,0)
+        self.assertFalse(self.window.controller.audio.playing)
     def test_library_and_selection_do_not_expose_filesystem_paths(self):
         state=self.request()
         self.assertNotIn(str(self.root),json.dumps(state,ensure_ascii=False))
@@ -81,22 +81,22 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
         self.select();self.assertEqual(self.request()['song_id'],state['library'][0]['id'])
         self.assertFalse(self.request({'action':'select','song_id':'../outside.mid'})['ok'])
     def test_autoplay_and_live_desktop_progress(self):
-        self.select(autoplay=True);self.assertTrue(self.window.audio.playing)
-        self.window.audio.advance(3);self.window.update_playback();self.window.poll_remote()
+        self.select(autoplay=True);self.assertTrue(self.window.controller.audio.playing)
+        self.window.controller.audio.advance(3);self.window.update_playback();self.window.poll_remote()
         self.assertAlmostEqual(self.request()['position'],3,delta=.3)
         self.window.pause_listening();self.window.poll_remote()
         self.assertEqual(self.request()['transport'],'paused')
     def test_remote_game_routes_to_player_without_synthetic_test_input(self):
         self.select();self.request({'action':'game_play'})
-        self.assertEqual(self.window.player.calls[-1][0],'play')
-        self.assertFalse(self.window.audio.playing)
+        self.assertEqual(self.window.controller.player.calls[-1][0],'play')
+        self.assertFalse(self.window.controller.audio.playing)
         self.request({'action':'game_stop'})
-        self.assertEqual(self.window.player.calls[-1],('stop_playback',))
+        self.assertEqual(self.window.controller.player.calls[-1],('stop_playback',))
     def test_edited_score_is_rendered_before_phone_game_start(self):
-        self.select();notes=[dict(n) for n in self.window.project['notes']];notes[0]['pitch']+=1
-        self.window.notes_changed(notes);self.assertTrue(self.window.export_dirty)
-        self.request({'action':'game_play'});self.wait_for(lambda:self.window.future is None)
-        self.assertFalse(self.window.export_dirty);self.assertEqual(self.window.player.calls[-1][0],'play')
+        self.select();notes=[dict(n) for n in self.window.controller.state.project['notes']];notes[0]['pitch']+=1
+        self.window.notes_changed(notes);self.assertTrue(self.window.controller.state.export_dirty)
+        self.request({'action':'game_play'});self.wait_for(lambda:self.window.controller.jobs.current is None)
+        self.assertFalse(self.window.controller.state.export_dirty);self.assertEqual(self.window.controller.player.calls[-1][0],'play')
     def test_qr_and_shutdown_keep_service_opt_in(self):
         pixmap=qr_pixmap(self.server.url('127.0.0.1'))
         self.assertGreater(pixmap.width(),200)
@@ -148,26 +148,26 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
         self.select()
         state=self.request();score=self.request(path='/api/score')
         self.assertEqual(state['score_id'],score['id'])
-        actual=json.loads((self.window.result[0]/'音符.json').read_text(encoding='utf-8'))
+        actual=json.loads((self.window.controller.state.result[0]/'音符.json').read_text(encoding='utf-8'))
         self.assertEqual(len(actual),len(score['notes']))
         for note,row in zip(actual,score['notes']):
             self.assertAlmostEqual(note['start'],row[0],places=6)
             self.assertAlmostEqual(note['end'],row[1],places=6)
             self.assertEqual(note['pitch'],row[2])
         cached=self.window.remote_score_snapshot()
-        self.window.audio.advance(2);self.window.poll_remote()
+        self.window.controller.audio.advance(2);self.window.poll_remote()
         self.assertIs(self.window.remote_score_snapshot(),cached)
         self.assertNotIn('notes',state)
 
     def test_remote_score_revision_changes_on_edit_export_and_clear(self):
         self.select();before=self.request()['score_id']
-        notes=[dict(n) for n in self.window.project['notes']];notes[0]['pitch']+=1
+        notes=[dict(n) for n in self.window.controller.state.project['notes']];notes[0]['pitch']+=1
         self.window.notes_changed(notes);self.window.poll_remote()
         edited=self.request(path='/api/score')
         self.assertNotEqual(edited['id'],before)
         self.assertEqual(edited['notes'][0][2],notes[0]['pitch'])
         self.assertAlmostEqual(edited['notes'][0][0],notes[0]['start'],places=6)
-        self.window.begin_export();self.wait_for(lambda:self.window.future is None);self.window.poll_remote()
+        self.window.begin_export();self.wait_for(lambda:self.window.controller.jobs.current is None);self.window.poll_remote()
         exported=self.request(path='/api/score')
         self.assertNotEqual(exported['id'],edited['id'])
         self.window.load_file(self.root/'music/手机试播.mid');self.window.poll_remote()

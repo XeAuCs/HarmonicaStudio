@@ -1,7 +1,7 @@
 """Offscreen end-to-end verification without sound or game input."""
 from copy import deepcopy
 from pathlib import Path
-import json, os, subprocess, time, traceback, uuid, wave, shutil
+import json, os, subprocess, sys, time, traceback, uuid, wave, shutil
 
 
 class FakeAudio:
@@ -48,19 +48,42 @@ def self_test(report_path):
         from PySide6.QtWidgets import QApplication
         from .gui import MainWindow,STYLE,map_time
         from .midi import read_midi
-        from .paths import resource_root
+        from .paths import resource_root, default_library_root, application_root, data_root
         from .project import load_project
         app=QApplication.instance() or QApplication([]);app.setStyle('Fusion');app.setStyleSheet(STYLE)
         fonts=Path(os.environ.get('WINDIR','C:/Windows'))/'Fonts'
         for name in ('msyh.ttc','msyhbd.ttc','segoeui.ttf'):
             if (fonts/name).is_file():QFontDatabase.addApplicationFont(str(fonts/name))
         home=report_path.parent/(report_path.stem+'-data-'+uuid.uuid4().hex[:6])
+        # Exercise native filename handling; FakeAudio cannot expose MCI's path limit.
+        from .playback import AudioPlayer
+        native_folder=home/('native-long-path-'+'x'*60)
+        native_folder.mkdir(parents=True)
+        native_path=native_folder/'Bad Apple!!（坏家伙）-试听.wav'
+        with wave.open(str(native_path),'wb') as sound:
+            sound.setparams((1,2,22050,0,'NONE','not compressed'))
+            sound.writeframes(b'\0\0'*22050)
+        native=AudioPlayer();staged=None
+        try:
+            native.load(native_path)
+            assert abs(native.duration-1)<.01
+            native.seek(.25);assert abs(native.position-.25)<.01
+            staged=Path(native._staged_audio.name) if native._staged_audio else None
+        finally:native.close()
+        assert staged is None or not staged.exists()
+        assert native_path.is_file()
+        checks.append('native Windows audio opens long Unicode paths, seeks and cleans private copies')
         from .preferences import Preferences,save_preferences,load_preferences
         from .theme import theme_palette
         from .settings_ui import SettingsDialog
         from PySide6.QtCore import QTimer
         music=home/'music';music.mkdir(parents=True)
-        for file in (resource_root()/'samples').iterdir():
+        if getattr(sys, 'frozen', False):
+            assert default_library_root() == application_root() / 'samples'
+            assert data_root() == application_root() / 'data'
+            assert not (resource_root() / 'samples').exists()
+            checks.append('portable paths use EXE-adjacent samples and data, without an internal library')
+        for file in default_library_root().iterdir():
             if file.suffix.lower() in ('.mid','.midi','.kar','.rmi') or file.name=='catalog.json':shutil.copyfile(file,music/file.name)
         save_preferences(home/'preferences.json',Preferences(library_folder=str(music)))
         def create_window():
@@ -68,7 +91,7 @@ def self_test(report_path):
             windows.append(window);window.show();app.processEvents();return window
         def finish(window,allow_errors=False):
             deadline=time.monotonic()+90
-            while window.future is not None:
+            while window.controller.jobs.current is not None:
                 if time.monotonic()>deadline:raise TimeoutError('界面任务超时。')
                 app.processEvents();window.poll()
                 if errors and not allow_errors:raise AssertionError(errors)
@@ -99,7 +122,7 @@ def self_test(report_path):
         for entry,action in zip(entries,actions):
             read_midi(entry['path'])
             action.trigger();finish(window)
-            assert window.source.name==entry['file'] and window.table.rowCount()>0
+            assert window.controller.state.source.name==entry['file'] and window.table.rowCount()>0
             if 'options' in entry:
                 options=window.selected_options()
                 assert (options.track,options.channel)==(entry['options']['track'],entry['options']['channel'])
@@ -117,67 +140,67 @@ def self_test(report_path):
         window.load_example();finish(window)
         assert window.table.rowCount()>=1 and window.convert_button.isEnabled()
         window.convert_button.click();finish(window)
-        assert window.result and window.listen_button.isEnabled()
-        baseline_folder,baseline_report=window.result
+        assert window.controller.state.result and window.listen_button.isEnabled()
+        baseline_folder,baseline_report=window.controller.state.result
         assert baseline_report['melody_notes']==94 and baseline_report['dropped_out_of_range']==0
-        assert (window.home/'settings.json').is_file();validate_ahk(baseline_folder)
+        assert (window.controller.home/'settings.json').is_file();validate_ahk(baseline_folder)
         checks.extend(['sample MIDI import and recommended melody','background conversion of 94 notes',
             'MIDI/WAV/AHK/project export and AHK validation','preferences persisted'])
 
         # Modify the widget using a vertical-only gesture, then exercise UI history.
-        original_notes=deepcopy(window.project['notes']);rectangle=window.roll._rect(original_notes[0])
+        original_notes=deepcopy(window.controller.state.project['notes']);rectangle=window.roll._rect(original_notes[0])
         start=QPoint(round(rectangle.left()+rectangle.width()*.3),round(rectangle.center().y()))
         end=start+QPoint(0,-window.roll.ROW)
         assert window.roll.viewport().rect().contains(start),(start,window.roll.viewport().rect())
-        window.audio.fail_next_close=True
+        window.controller.audio.fail_next_close=True
         QTest.mousePress(window.roll.viewport(),Qt.LeftButton,Qt.NoModifier,start)
         QTest.mouseMove(window.roll.viewport(),end,10)
         QTest.mouseRelease(window.roll.viewport(),Qt.LeftButton,Qt.NoModifier,end);app.processEvents()
-        edited_notes=deepcopy(window.project['notes']);expected=deepcopy(original_notes);expected[0]['pitch']+=1
+        edited_notes=deepcopy(window.controller.state.project['notes']);expected=deepcopy(original_notes);expected[0]['pitch']+=1
         assert edited_notes==expected,(edited_notes[0],expected[0])
-        assert window.export_dirty and window.project_dirty
+        assert window.controller.state.export_dirty and window.controller.state.project_dirty
         assert not window.arm_button.isEnabled() and not window.folder_button.isEnabled()
-        assert not window.audio.fail_next_close and window.preview_duration==0
+        assert not window.controller.audio.fail_next_close and window.controller.state.preview_duration==0
         # Even a failing device close cannot lose the edit or re-enable stale exports.
-        window.audio.close();assert window.audio.path is None
-        window.undo_button.click();assert window.project['notes']==original_notes
-        window.redo_button.click();assert window.project['notes']==edited_notes
+        window.controller.audio.close();assert window.controller.audio.path is None
+        window.undo_button.click();assert window.controller.state.project['notes']==original_notes
+        window.redo_button.click();assert window.controller.state.project['notes']==edited_notes
         checks.extend(['Qt mouse gesture changes pitch while preserving exact timing',
             'edits invalidate stale audio and script actions even when audio close fails',
             'undo and redo through UI'])
 
         # The project must reopen and export with an unavailable source MIDI.
         missing_source=home/'original-midi-no-longer-present.mid';assert not missing_source.exists()
-        window.project['source']={'path':str(missing_source)}
+        window.controller.state.project['source']={'path':str(missing_source)}
         saved=home/'修订后的欢乐颂.hstudio';window.save_to(saved)
-        assert load_project(saved)['notes']==edited_notes and not window.project_dirty
+        assert load_project(saved)['notes']==edited_notes and not window.controller.state.project_dirty
         window.open_project(saved);assert not errors,errors
-        assert window.source is None and not window.parts and window.result is None
-        assert window.project['notes']==edited_notes and not window.arm_button.isEnabled()
+        assert window.controller.state.source is None and not window.controller.state.parts and window.controller.state.result is None
+        assert window.controller.state.project['notes']==edited_notes and not window.arm_button.isEnabled()
         checks.append('save and reopen self-contained project with missing source MIDI')
 
         # Click the logical ruler before asking Listen to render current edits.
         window.roll.horizontalScrollBar().setValue(0)
         QTest.mouseClick(window.roll.viewport(),Qt.LeftButton,Qt.NoModifier,
             QPoint(round(window.roll._rect(dict(start=1.0,end=2.0,pitch=60)).left()),10))
-        assert abs(window.logical_seek-1.0)<.001,window.logical_seek
-        window.audio.fail_next_load=True
+        assert abs(window.controller.state.logical_seek-1.0)<.001,window.controller.state.logical_seek
+        window.controller.audio.fail_next_load=True
         window.listen_button.click();finish(window,allow_errors=True)
         assert errors==['Expected diagnostic audio load failure'],errors
         errors.clear()
-        assert window.result and not window.export_dirty and window.preview_duration==0
-        failed_audio_folder=window.result[0]
+        assert window.controller.state.result and not window.controller.state.export_dirty and window.controller.state.preview_duration==0
+        failed_audio_folder=window.controller.state.result[0]
         window.listen_button.click();finish(window)
-        assert window.result[0]==failed_audio_folder
-        assert window.transport=='playing' and window.audio.playing
-        edited_folder,edited_report=window.result
+        assert window.controller.state.result[0]==failed_audio_folder
+        assert window.controller.state.transport=='playing' and window.controller.audio.playing
+        edited_folder,edited_report=window.controller.state.result
         assert edited_folder!=baseline_folder and edited_report['edited']
-        assert window.project['notes']==edited_notes
+        assert window.controller.state.project['notes']==edited_notes
         assert load_project(edited_folder/'工程.hstudio')['notes']==edited_notes
         actual_notes=json.loads((edited_folder/'音符.json').read_text(encoding='utf-8'))
         midi_parts,_=read_midi(edited_folder/'口琴单旋律.mid')
         assert midi_parts[(0,0)]==actual_notes and actual_notes[0]['pitch']==edited_notes[0]['pitch']
-        assert abs(window.audio.position-map_time(1.0,window.time_anchors))<.001
+        assert abs(window.controller.audio.position-map_time(1.0,window.controller.time_anchors))<.001
         validate_ahk(edited_folder)
         checks.extend(['ruler seek before rendering','listen automatically exports current edits',
             'audio load failure retries on Listen without losing or re-exporting edits',
@@ -196,16 +219,16 @@ def self_test(report_path):
             gaps_checked+=1
         assert gaps_checked>0
         for logical,physical in zip(edited_notes,actual_notes):
-            assert abs(window._to_score(physical['start'])-logical['start'])<1e-8
+            assert abs(window.controller.to_score(physical['start'])-logical['start'])<1e-8
         checks.append('score scrolls through every release gap while note attacks stay aligned')
 
-        window.audio.advance(2.4);window.poll()
-        assert abs(window.playback_progress.value()-round(window.audio.position*1000))<=5
+        window.controller.audio.advance(2.4);window.poll()
+        assert abs(window.playback_progress.value()-round(window.controller.audio.position*1000))<=5
         assert window.roll._position is not None
-        window.pause_button.click();paused=window.audio.position
-        assert window.transport=='paused' and not window.audio.playing
-        window.audio.advance(3);window.poll();assert window.audio.position==paused
-        window.listen_button.click();assert window.audio.playing and abs(window.audio.position-paused)<.001
+        window.pause_button.click();paused=window.controller.audio.position
+        assert window.controller.state.transport=='paused' and not window.controller.audio.playing
+        window.controller.audio.advance(3);window.poll();assert window.controller.audio.position==paused
+        window.listen_button.click();assert window.controller.audio.playing and abs(window.controller.audio.position-paused)<.001
         checks.append('native-position transport UI with pause and resume (silent backend)')
 
         slider=window.playback_progress;point=QPoint(round(slider.width()*.2),max(1,slider.height()//2))
@@ -213,23 +236,23 @@ def self_test(report_path):
         QTest.mousePress(slider,Qt.LeftButton,Qt.NoModifier,point);QTest.mouseMove(slider,destination,10)
         QTest.mouseRelease(slider,Qt.LeftButton,Qt.NoModifier,destination);window.poll()
         expected_ms=round((destination.x()-7)/(slider.width()-14)*slider.maximum())
-        assert abs(window.audio.position*1000-expected_ms)<=1
-        assert window.audio.playing and window.transport=='playing'
+        assert abs(window.controller.audio.position*1000-expected_ms)<=1
+        assert window.controller.audio.playing and window.controller.state.transport=='playing'
         checks.append('progress slider drag seeks and continues playback')
 
         window.quiet_button.click()
-        assert window.audio.position==0 and not window.audio.playing
+        assert window.controller.audio.position==0 and not window.controller.audio.playing
         assert window.playback_progress.value()==0 and window.roll._position is None
-        window.listen_button.click();window.audio.advance(window.audio.duration+1);window.poll()
-        assert window.transport=='ended' and window.playback_state.text()=='已结束'
+        window.listen_button.click();window.controller.audio.advance(window.controller.audio.duration+1);window.poll()
+        assert window.controller.state.transport=='ended' and window.playback_state.text()=='已结束'
         assert window.playback_progress.value()==window.playback_progress.maximum()
-        window.listen_button.click();assert window.audio.playing and window.audio.position==0
+        window.listen_button.click();assert window.controller.audio.playing and window.controller.audio.position==0
         window.quiet_button.click()
         checks.append('stop resets cursor; natural completion and replay work')
 
         # Re-export must not bake the 100 ms physical lead-in into editable time.
-        window.export_button.click();finish(window);repeated_folder,report=window.result
-        assert repeated_folder!=edited_folder and window.project['notes']==edited_notes
+        window.export_button.click();finish(window);repeated_folder,report=window.controller.state.result
+        assert repeated_folder!=edited_folder and window.controller.state.project['notes']==edited_notes
         assert load_project(repeated_folder/'工程.hstudio')['notes']==edited_notes
         assert json.loads((repeated_folder/'音符.json').read_text(encoding='utf-8'))==actual_notes
         assert load_project(home/'autosave.hstudio')['notes']==edited_notes
@@ -238,20 +261,20 @@ def self_test(report_path):
         window.listen_button.click();window.seek_editor(16.0);window.poll();app.processEvents();assert_centered(window.roll)
         screenshot=report_path.with_suffix('.png');assert window.grab().save(str(screenshot))
         assert window.arm_button.isEnabled() and window.folder_button.isEnabled()
-        window.close();app.processEvents();assert window.audio.path is None and not window.audio.playing
+        window.close();app.processEvents();assert window.controller.audio.path is None and not window.controller.audio.playing
         restored=create_window();assert restored.restore_button.isEnabled();restored.restore_button.click()
-        assert restored.project['notes']==edited_notes and restored.roll.get_notes()==edited_notes
-        assert restored.source is None and not restored.project_dirty
+        assert restored.controller.state.project['notes']==edited_notes and restored.roll.get_notes()==edited_notes
+        assert restored.controller.state.source is None and not restored.controller.state.project_dirty
         assert not errors,errors
-        saved_notes=deepcopy(restored.project['notes'])
+        saved_notes=deepcopy(restored.controller.state.project['notes'])
         restored.roll.fit_pitches();assert restored.roll.get_notes()==saved_notes
         choose_mode(restored,True);assert restored.compact and restored.edit_toolbar.isHidden()
-        assert restored.project['notes']==saved_notes and restored.roll.get_notes()==saved_notes
+        assert restored.controller.state.project['notes']==saved_notes and restored.roll.get_notes()==saved_notes
         restored.seek_editor(16.0);app.processEvents();assert_centered(restored.roll)
         compact_screenshot=report_path.with_name(report_path.stem+'-compact.png')
         app.processEvents();assert restored.grab().save(str(compact_screenshot))
         choose_mode(restored,False);assert not restored.compact
-        assert restored.project['notes']==saved_notes
+        assert restored.controller.state.project['notes']==saved_notes
         checks.append('piano pitch axis and mode changes through Settings preserve the edited score')
         checks.append('full and compact playback stay centered with aligned score coordinates')
         observed=[];settings_screenshot=report_path.with_name(report_path.stem+'-settings.png')
@@ -271,9 +294,9 @@ def self_test(report_path):
         checks.append('settings preview cancels correctly and theme persists')
         choose_mode(restored,True)
         action=next(a for a in restored.library_actions if a.data()=='春日影.mid');action.trigger();finish(restored)
-        assert restored.project and len(restored.project['notes'])==660
-        assert restored.result[1]['dropped_out_of_range']==0 and restored.result[1]['delayed_notes']==0
-        validate_ahk(restored.result[0])
+        assert restored.controller.state.project and len(restored.controller.state.project['notes'])==660
+        assert restored.controller.state.result[1]['dropped_out_of_range']==0 and restored.controller.state.result[1]['delayed_notes']==0
+        validate_ahk(restored.controller.state.result[0])
         restored.listen_button.click();assert restored.animation_timer.isActive() and restored.animation_timer.interval()==16
         restored.timer.stop();start=restored.playback_progress.value();QTest.qWait(60)
         assert restored.playback_progress.value()>start
@@ -314,17 +337,17 @@ def self_test(report_path):
             phone_score=remote_request('/api/score')
             assert phone_score['id']==state['score_id'] and len(phone_score['notes'])==660
             assert 'notes' not in state
-            scheduled=json.loads((restored.result[0]/'音符.json').read_text(encoding='utf-8'))
+            scheduled=json.loads((restored.controller.state.result[0]/'音符.json').read_text(encoding='utf-8'))
             assert abs(phone_score['notes'][0][0]-scheduled[0]['start'])<.000001
             checks.append('phone score uses exported timing and separate authenticated score snapshots')
-            assert remote_request('/api/command',{'action':'play'})['ok'];assert restored.audio.playing
+            assert remote_request('/api/command',{'action':'play'})['ok'];assert restored.controller.audio.playing
             assert remote_request('/api/command',{'action':'seek','position':12})['ok']
-            assert abs(restored.audio.position-12)<.01
-            assert remote_request('/api/command',{'action':'pause'})['ok'];assert not restored.audio.playing
-            assert remote_request('/api/command',{'action':'stop'})['ok'];assert restored.audio.position==0
+            assert abs(restored.controller.audio.position-12)<.01
+            assert remote_request('/api/command',{'action':'pause'})['ok'];assert not restored.controller.audio.playing
+            assert remote_request('/api/command',{'action':'stop'})['ok'];assert restored.controller.audio.position==0
             first=state['library'][0]
             assert remote_request('/api/command',{'action':'select','song_id':first['id']})['ok']
-            finish(restored);assert restored.project and not restored.export_dirty
+            finish(restored);assert restored.controller.state.project and not restored.controller.state.export_dirty
             restored.remote_dialog=RemoteDialog(remote,[('本机验证','127.0.0.1')],restored)
             restored.remote_dialog.show();app.processEvents()
             pairing=restored.remote_dialog;original_url=pairing.url.text()
@@ -346,26 +369,49 @@ def self_test(report_path):
         long_notes=[dict(start=0,end=5,pitch=60,velocity=80),dict(start=15,end=16,pitch=62,velocity=90)]
         long_project=home/'长空白验证.hstudio';save_project(long_project,make_project(long_notes,'长空白验证'))
         restored.open_project(long_project);restored.begin_export();finish(restored)
-        shortened=restored.preview_duration
-        assert restored.project['notes']==long_notes
-        assert restored.result[1]['skipped_long_rests']==1
-        assert abs(restored.result[1]['removed_rest_seconds']-9.4)<.000001
-        assert abs(restored._to_audio(4)-4.1)<.000001
-        assert abs(restored._to_score(5.4)-10)<.000001
-        validate_ahk(restored.result[0])
+        shortened=restored.controller.state.preview_duration
+        assert restored.controller.state.project['notes']==long_notes
+        assert restored.controller.state.result[1]['skipped_long_rests']==1
+        assert abs(restored.controller.state.result[1]['removed_rest_seconds']-9.4)<.000001
+        assert abs(restored.controller.to_audio(4)-4.1)<.000001
+        assert abs(restored.controller.to_score(5.4)-10)<.000001
+        validate_ahk(restored.controller.state.result[0])
         score=restored.remote_score_snapshot()
         assert abs(score['notes'][1][0]-score['notes'][0][1]-.6)<.000001
         def disable_skip():
             dialog=app.activeModalWidget();dialog.skip_long_rests.setChecked(False);dialog.accept()
         QTimer.singleShot(30,disable_skip);restored.open_settings()
-        assert restored.result is None and restored.export_dirty
+        assert restored.controller.state.result is None and restored.controller.state.export_dirty
         restored.begin_export();finish(restored)
-        assert abs(restored.preview_duration-shortened-9.4)<.001
-        assert restored.project['notes']==long_notes and restored.result[1]['skipped_long_rests']==0
+        assert abs(restored.controller.state.preview_duration-shortened-9.4)<.001
+        assert restored.controller.state.project['notes']==long_notes and restored.controller.state.result[1]['skipped_long_rests']==0
         assert not load_preferences(home/'preferences.json').skip_long_rests
         checks.extend(['long silence shortens consistently for audio, game script and phone score',
                        'held notes keep normal cursor speed while silent regions pass faster',
                        'disabling long-rest setting invalidates previous exports and restores original timing'])
+        from .midi import write_midi
+        from .storage import load_options
+        from .melody import simplify
+        held=[dict(pitch=72,start=0,end=2,velocity=80),dict(pitch=74,start=2,end=2.5,velocity=80)]
+        assert simplify(held+[dict(pitch=67,start=.5,end=.8,velocity=80)],'continuous')==held
+        wide=home/'乐句八度验证.mid'
+        write_midi([dict(pitch=p,start=s,end=s+.5,velocity=80) for p,s in ((36,0),(40,.5),(96,2),(100,2.5))],wide)
+        choose_mode(restored,False);restored.load_file(wide);finish(restored)
+        restored.mode.setCurrentIndex(restored.mode.findData('continuous'));restored.phrase_octave.setChecked(True)
+        restored.tabs.setCurrentIndex(0);app.processEvents()
+        assert restored.grab().save(str(report_path.with_name(report_path.stem+'-melody-options.png')))
+        restored.convert_button.click();finish(restored)
+        assert len(restored.controller.state.project['notes'])==4
+        assert restored.controller.state.result[1]['dropped_out_of_range']==0
+        assert restored.controller.state.result[1]['phrase_adjusted_notes']>0
+        assert load_options(home/'settings.json').melody_mode=='continuous'
+        assert load_options(home/'settings.json').phrase_octave
+        assert '按句调整' in restored.summary.text() and '半音' in restored.summary.toolTip()
+        assert restored.grab().save(str(report_path.with_name(report_path.stem+'-melody-result.png')))
+        validate_ahk(restored.controller.state.result[0])
+        checks.extend(['continuous extraction preserves sustained melody over lower accompaniment',
+                       'phrase octave controls retain wide phrases and persist conversion settings',
+                       'phrase changes are visible and exported with playable MIDI and AHK'])
         restored.close();app.processEvents()
         checks.extend(['autosave restores edited score in a new window',
             'rendered current editor and playback cursor','window close releases audio'])

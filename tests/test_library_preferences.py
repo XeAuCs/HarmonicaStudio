@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from harmonica_studio.library import sample_entries
 from harmonica_studio.preferences import Preferences, load_preferences, save_preferences
-from harmonica_studio.paths import default_library_root
+from harmonica_studio.paths import default_library_root, data_root, library_path, library_setting
 
 
 class LibraryTests(unittest.TestCase):
@@ -42,10 +42,22 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(sample_entries(self.root)[0]['file'],'real.rmi')
         self.assertEqual(sample_entries(self.root/'missing'),[])
 
-    def test_packaged_default_points_to_editable_project_folder(self):
-        executable=self.root/'app/HarmonicaStudio/HarmonicaStudio.exe'
-        with patch('sys.frozen',True,create=True),patch('sys.executable',str(executable)):
-            self.assertEqual(default_library_root(),self.root/'samples')
+    def test_packaged_paths_follow_executable_even_under_app_or_after_moving(self):
+        for folder in (self.root/'app/HarmonicaStudio', self.root/'移动后的目录'):
+            with self.subTest(folder=folder), patch.dict('os.environ', {}, clear=True), \
+                    patch('sys.frozen',True,create=True), patch('sys.executable',str(folder/'HarmonicaStudio.exe')):
+                self.assertEqual(default_library_root(), folder/'samples')
+                self.assertEqual(data_root(), folder/'data')
+                self.assertEqual(library_setting(str(folder/'samples')), '')
+                self.assertEqual(library_setting(str(folder/'个人曲库')), '个人曲库')
+                self.assertEqual(library_path('个人曲库'), folder/'个人曲库')
+                self.assertEqual(library_path(''), folder/'samples')
+
+    def test_explicit_external_data_and_library_locations_remain_supported(self):
+        external = self.root/'外部数据'
+        with patch.dict('os.environ', {'HARMONICA_STUDIO_HOME':str(external)}):
+            self.assertEqual(data_root(), external)
+        self.assertEqual(library_path(str(external)), external)
 
     def test_preferences_survive_restart(self):
         path=self.root/'preferences.json'

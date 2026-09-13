@@ -47,7 +47,7 @@ class SettingsWorkflowTests(unittest.TestCase):
             self.app.processEvents();QTest.qWait(10)
 
     def finish(self):
-        self.wait_for(lambda:self.window.future is None)
+        self.wait_for(lambda:self.window.controller.jobs.current is None)
 
     def add_song(self):
         song=self.folder/'测试曲.mid'
@@ -75,19 +75,41 @@ class SettingsWorkflowTests(unittest.TestCase):
         self.choose_mode(True)
         self.window.library_actions[0].trigger();self.finish()
         self.assertTrue(self.window.compact)
-        self.assertTrue(self.window.project)
-        self.assertEqual(self.window.project['options']['speed'],1)
-        self.assertEqual(self.window.project['options']['transpose'],0)
+        self.assertTrue(self.window.controller.state.project)
+        self.assertEqual(self.window.controller.state.project['options']['speed'],1)
+        self.assertEqual(self.window.controller.state.project['options']['transpose'],0)
         self.assertTrue(self.window.edit_toolbar.isHidden())
         self.assertFalse(self.window.tabs.isTabVisible(0))
         self.choose_mode(False)
-        notes=deepcopy(self.window.project['notes']);notes[0]['pitch']+=1
+        notes=deepcopy(self.window.controller.state.project['notes']);notes[0]['pitch']+=1
         self.window.notes_changed(notes)
         self.choose_mode(True);self.choose_mode(False)
-        self.assertEqual(self.window.project['notes'],notes)
-        self.assertTrue(self.window.export_dirty)
+        self.assertEqual(self.window.controller.state.project['notes'],notes)
+        self.assertTrue(self.window.controller.state.export_dirty)
         self.assertEqual(self.window.speed.value(),1.7)
         self.assertEqual(self.window.transpose.value(),7)
+
+    def test_continuous_and_phrase_octave_controls_convert_and_persist(self):
+        from harmonica_studio.midi import write_midi
+        from harmonica_studio.storage import load_options
+        song=self.folder/'宽音域.mid'
+        write_midi([dict(pitch=p,start=s,end=s+.5,velocity=80) for p,s in ((36,0),(40,.5),(96,2),(100,2.5))],song)
+        self.window.load_file(song);self.finish()
+        self.window.mode.setCurrentIndex(self.window.mode.findData('continuous'))
+        self.window.phrase_octave.setChecked(True)
+        self.window.convert_button.click();self.finish()
+        project=self.window.controller.state.project
+        self.assertEqual(len(project['notes']),4)
+        self.assertEqual(project['report']['dropped_out_of_range'],0)
+        self.assertIn('按句调整',self.window.summary.text())
+        self.assertIn('半音',self.window.summary.toolTip())
+        saved=load_options(self.home/'settings.json')
+        self.assertEqual(saved.melody_mode,'continuous');self.assertTrue(saved.phrase_octave)
+        other=MainWindow(home=self.home,audio=FakeAudio())
+        try:
+            self.assertEqual(other.mode.currentData(),'continuous')
+            self.assertTrue(other.phrase_octave.isChecked())
+        finally:other.close()
 
     def test_theme_preview_cancel_and_save_persist(self):
         observed=[]
@@ -117,7 +139,7 @@ class SettingsWorkflowTests(unittest.TestCase):
         QTest.qWait(70)
         self.assertGreater(self.window.playback_progress.value(),20)
         self.assertLess(abs(self.window.playback_progress.value()/1000-(time.perf_counter()-started)),.1)
-        self.window.audio.advance(.07);self.window.pause_button.click()
+        self.window.controller.audio.advance(.07);self.window.pause_button.click()
         paused=self.window.playback_progress.value();QTest.qWait(70)
         self.assertEqual(self.window.playback_progress.value(),paused)
         self.assertFalse(self.window.animation_timer.isActive())
@@ -134,7 +156,7 @@ class SettingsWorkflowTests(unittest.TestCase):
         for compact in (False,True):
             with self.subTest(compact=compact):
                 self.window.set_compact(compact)
-                now=[0.0];self.window.visual_clock=PlaybackClock(now=lambda:now[0])
+                now=[0.0];self.window.controller.clock=PlaybackClock(now=lambda:now[0])
                 self.window.listen();self.window.animation_timer.stop()
                 # Includes the 45 ms and 20 ms release gaps before both attacks.
                 positions=[];offsets=[]
@@ -149,14 +171,14 @@ class SettingsWorkflowTests(unittest.TestCase):
                     self.assertAlmostEqual(current-previous,1/60,places=7)
                 for previous,current in zip(offsets,offsets[1:]):
                     self.assertAlmostEqual(current-previous,self.window.roll._zoom/60,places=7)
-                self.window.audio.position=2.2;self.window.pause_listening()
+                self.window.controller.audio.position=2.2;self.window.pause_listening()
                 paused=self.window.roll._view_offset;now[0]+=1;self.window.animate_playback()
                 self.assertEqual(self.window.roll._view_offset,paused)
                 self.window.seek_editor(1.5)
-                self.assertAlmostEqual(self.window.audio.position,1.6)
+                self.assertAlmostEqual(self.window.controller.audio.position,1.6)
                 self.assertAlmostEqual(self.window.roll._position,1.5)
                 self.window.stop_listening()
-                self.assertEqual(self.window.project['notes'],notes)
+                self.assertEqual(self.window.controller.state.project['notes'],notes)
 
     def test_default_library_stays_portable_after_saving_theme(self):
         dialog=SettingsDialog(Preferences(),resource_root()/'samples',parent=self.window)
@@ -170,60 +192,60 @@ class SettingsWorkflowTests(unittest.TestCase):
                dict(start=15,end=16,pitch=62,velocity=90)]
         path=self.root/'旧工程.hstudio';save_project(path,make_project(notes,'长音与空白'))
         self.window.open_project(path)
-        self.assertTrue(self.window.project['options']['skip_long_rests'])
+        self.assertTrue(self.window.controller.state.project['options']['skip_long_rests'])
         pending_score=self.window.remote_score_snapshot()
         self.assertEqual(pending_score['duration'],self.window.logical_duration())
         self.window.begin_export();self.finish()
-        short_duration=self.window.preview_duration
+        short_duration=self.window.controller.state.preview_duration
         expected_score=self.window.remote_score_snapshot()
         self.assertNotEqual(expected_score['id'],pending_score['id'])
         self.assertAlmostEqual(expected_score['notes'][1][0]-expected_score['notes'][0][1],.6,places=3)
-        self.assertEqual(self.window.project['report']['skipped_long_rests'],1)
+        self.assertEqual(self.window.controller.state.project['report']['skipped_long_rests'],1)
         self.assertIn('9.4 秒空白',self.window.summary.text())
-        self.assertEqual(self.window.project['notes'],notes)
+        self.assertEqual(self.window.controller.state.project['notes'],notes)
         self.window.seek_editor(3);self.window.listen()
         def turn_off():
             dialog=self.app.activeModalWidget();dialog.skip_long_rests.setChecked(False);dialog.accept()
         QTimer.singleShot(20,turn_off);self.window.open_settings()
-        self.assertFalse(self.window.preferences.skip_long_rests)
-        self.assertFalse(self.window.audio.playing)
-        self.assertIsNone(self.window.result)
-        self.assertTrue(self.window.export_dirty)
-        self.assertEqual(self.window.time_anchors,[])
-        self.assertEqual(self.window.project['notes'],notes)
+        self.assertFalse(self.window.controller.preferences.skip_long_rests)
+        self.assertFalse(self.window.controller.audio.playing)
+        self.assertIsNone(self.window.controller.state.result)
+        self.assertTrue(self.window.controller.state.export_dirty)
+        self.assertEqual(self.window.controller.time_anchors,[])
+        self.assertEqual(self.window.controller.state.project['notes'],notes)
         self.assertNotEqual(self.window.remote_score_snapshot()['id'],expected_score['id'])
         self.window.begin_export();self.finish()
-        self.assertAlmostEqual(self.window.preview_duration-short_duration,9.4,places=3)
-        self.assertEqual(self.window.project['report']['skipped_long_rests'],0)
-        self.assertEqual(self.window.project['notes'],notes)
+        self.assertAlmostEqual(self.window.controller.state.preview_duration-short_duration,9.4,places=3)
+        self.assertEqual(self.window.controller.state.project['report']['skipped_long_rests'],0)
+        self.assertEqual(self.window.controller.state.project['notes'],notes)
         self.assertFalse(load_preferences(self.home/'preferences.json').skip_long_rests)
-        original_folder=self.window.result[0]
+        original_folder=self.window.controller.state.result[0]
         def only_theme():
             dialog=self.app.activeModalWidget();dialog.theme.setCurrentIndex(dialog.theme.findData('blue'));dialog.accept()
         QTimer.singleShot(20,only_theme);self.window.open_settings()
-        self.assertEqual(self.window.result[0],original_folder)
-        self.assertFalse(self.window.export_dirty)
+        self.assertEqual(self.window.controller.state.result[0],original_folder)
+        self.assertFalse(self.window.controller.state.export_dirty)
 
     def test_long_rest_setting_applies_to_both_modes_and_busy_dialog(self):
         from dataclasses import replace
         self.window.load_example();self.finish()
         for enabled in (True,False):
-            self.window.preferences=replace(self.window.preferences,skip_long_rests=enabled)
+            self.window.controller.preferences=replace(self.window.controller.preferences,skip_long_rests=enabled)
             for compact in (False,True):
                 self.window.compact=compact
                 self.assertEqual(self.window.selected_options().skip_long_rests,enabled)
-        dialog=SettingsDialog(self.window.preferences,self.folder,busy=True,parent=self.window)
+        dialog=SettingsDialog(self.window.controller.preferences,self.folder,busy=True,parent=self.window)
         self.assertFalse(dialog.skip_long_rests.isEnabled())
         dialog.deleteLater()
 
     def test_cancelled_long_rest_setting_keeps_export(self):
         self.window.load_example();self.finish();self.window.begin_convert();self.finish()
-        before=self.window.result
+        before=self.window.controller.state.result
         def cancel():
             dialog=self.app.activeModalWidget();dialog.skip_long_rests.setChecked(False);dialog.reject()
         QTimer.singleShot(20,cancel);self.window.open_settings()
-        self.assertIs(self.window.result,before)
-        self.assertTrue(self.window.preferences.skip_long_rests)
+        self.assertIs(self.window.controller.state.result,before)
+        self.assertTrue(self.window.controller.preferences.skip_long_rests)
 
     def test_cancelled_mode_setting_leaves_current_view_unchanged(self):
         def cancel_mode():
@@ -238,8 +260,11 @@ class SettingsWorkflowTests(unittest.TestCase):
         self.window.load_example();self.finish()
         # A completed cancellation models the worker's real result at the UI boundary.
         self.window.compact=True;cancelled=Future();cancelled.set_exception(InterruptedError('转换已取消。'))
-        self.window.future=cancelled;self.window.job_kind='convert';self.window.poll()
+        from unittest.mock import patch
+        with patch.object(self.window.controller.jobs.executor, 'submit', return_value=cancelled):
+            self.window.begin_convert()
+        self.window.poll()
         self.assertTrue(self.window.listen_button.isEnabled())
         self.assertEqual(self.window.listen_button.text(),'重新生成')
         self.window.listen_button.click();self.finish()
-        self.assertTrue(self.window.project)
+        self.assertTrue(self.window.controller.state.project)

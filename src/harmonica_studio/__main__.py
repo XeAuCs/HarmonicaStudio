@@ -12,8 +12,9 @@ def main():
     convert=sub.add_parser('convert',help='转换 MIDI');convert.add_argument('file');convert.add_argument('--out',default='data/exports')
     convert.add_argument('--speed',type=float,default=1);convert.add_argument('--transpose',type=int,default=0)
     convert.add_argument('--track',type=int);convert.add_argument('--channel',type=int,help='通道 1–16')
-    convert.add_argument('--mode',choices=('sustain','highest'),default='sustain');convert.add_argument('--keep-silence',action='store_true')
+    convert.add_argument('--mode',choices=('sustain','highest','continuous'),default='sustain');convert.add_argument('--keep-silence',action='store_true')
     convert.add_argument('--no-auto-octave',action='store_true')
+    convert.add_argument('--phrase-octave',action='store_true',help='超出音域时允许按乐句调整八度')
     convert.add_argument('--skip-long-rests',action='store_true',help='将音符之间超过 3 秒的空白缩短为 0.6 秒')
     args=parser.parse_args()
     if args.command in (None,'gui'):
@@ -34,7 +35,7 @@ def main():
             options=Options(speed=args.speed,transpose=args.transpose,track=args.track,
                 channel=None if args.channel is None else args.channel-1,melody_mode=args.mode,
                 trim_silence=not args.keep_silence,auto_octave=not args.no_auto_octave,
-                skip_long_rests=args.skip_long_rests)
+                skip_long_rests=args.skip_long_rests,phrase_octave=args.phrase_octave)
             folder,report=export(args.file,args.out,options);result=dict(folder=str(folder),report=report)
         print(json.dumps(result,ensure_ascii=False,indent=2));return 0
     except Exception as exc:

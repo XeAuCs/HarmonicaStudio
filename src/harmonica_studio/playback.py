@@ -5,7 +5,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess, sys, uuid
+import tempfile
 import wave
 from .paths import resource_root
 
@@ -23,6 +25,13 @@ def stop_preview():
         winsound.PlaySound(None,0)
 
 
+class AudioDeviceError(RuntimeError):
+    """Keep the native code so path failures do not hide device failures."""
+    def __init__(self, code, detail):
+        self.code = code
+        super().__init__(f'试听播放失败：{detail}（错误 {code}）。')
+
+
 class AudioPlayer:
     """One seekable local WAV player; all calls belong on the UI thread.
 
@@ -37,6 +46,7 @@ class AudioPlayer:
         self._loaded = False
         self._duration_ms = 0
         self.path = None
+        self._staged_audio = None
 
     def _send(self, command):
         if self._sender is not None:
@@ -61,7 +71,7 @@ class AudioPlayer:
             message = ctypes.create_unicode_buffer(512)
             found = self._winmm.mciGetErrorStringW(code, message, len(message))
             detail = message.value.strip() if found else '未知音频设备错误'
-            raise RuntimeError(f'试听播放失败：{detail}（错误 {code}）。')
+            raise AudioDeviceError(code, detail)
         return answer.value.strip()
 
     def _require_loaded(self):
@@ -112,7 +122,22 @@ class AudioPlayer:
                     raise RuntimeError('试听需要包含音频的 PCM WAV 文件。')
         except (OSError, EOFError, wave.Error) as exc:
             raise RuntimeError('无法读取试听音频，请使用有效的 PCM WAV 文件。') from exc
-        self._send(f'open "{target}" type waveaudio alias {self._alias}')
+        try:
+            self._send(f'open "{target}" type waveaudio alias {self._alias}')
+        except AudioDeviceError as exc:
+            if exc.code != 304:  # MCIERR_FILENAME_REQUIRED, including legacy path-length rejection.
+                raise
+            # The legacy wave driver rejects some valid long paths, including when
+            # passed through mciSendCommandW. Use a private short name, not a rename
+            # of the user's export or a shared file that another player can replace.
+            self._staged_audio = tempfile.TemporaryDirectory(prefix='hs-')
+            staged = Path(self._staged_audio.name) / 'audio.wav'
+            try:
+                shutil.copyfile(target, staged)
+                self._send(f'open "{staged}" type waveaudio alias {self._alias}')
+            except Exception:
+                self._cleanup_staged_audio()
+                raise
         self._loaded = True
         try:
             self._send(f'set {self._alias} time format milliseconds')
@@ -161,6 +186,12 @@ class AudioPlayer:
         self._loaded = False
         self._duration_ms = 0
         self.path = None
+        self._cleanup_staged_audio()
+
+    def _cleanup_staged_audio(self):
+        if self._staged_audio is not None:
+            self._staged_audio.cleanup()
+            self._staged_audio = None
 
 
 class ScriptPlayer:

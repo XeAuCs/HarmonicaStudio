@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from harmonica_studio.playback import AudioPlayer
+from harmonica_studio.playback import AudioDeviceError, AudioPlayer
 
 
 class FakeMCI:
@@ -191,6 +191,85 @@ class AudioPlayerTests(unittest.TestCase):
         self.backend.failure = None
         self.player.load(self.path)
         self.assertEqual(self.player.duration, 2)
+
+    def path_limited_sender(self, command):
+        if command.startswith('open ') and f'"{self.path.resolve()}"' in command:
+            raise AudioDeviceError(304, 'legacy path rejected')
+        return self.backend(command)
+
+    def test_filename_error_uses_private_copy_and_preserves_original(self):
+        original = self.path.read_bytes()
+        player = AudioPlayer(sender=self.path_limited_sender)
+        self.addCleanup(player.close)
+        player.load(self.path)
+        staged = Path(player._staged_audio.name) / 'audio.wav'
+        self.assertEqual(staged.read_bytes(), original)
+        self.assertEqual(player.path, self.path.resolve())
+        player.seek(.5, resume=True)
+        self.assertEqual(player.position, .5)
+        self.assertTrue(player.playing)
+        player.close()
+        self.assertFalse(staged.parent.exists())
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_two_players_own_separate_copies_and_reload_cleans_previous_copy(self):
+        first = AudioPlayer(sender=self.path_limited_sender)
+        second = AudioPlayer(sender=self.path_limited_sender)
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        first.load(self.path)
+        second.load(self.path)
+        first_copy, second_copy = Path(first._staged_audio.name), Path(second._staged_audio.name)
+        self.assertNotEqual(first_copy, second_copy)
+        first.load(self.path)
+        self.assertFalse(first_copy.exists())
+        self.assertTrue(second_copy.exists())
+        first.close()
+        self.assertTrue(second_copy.exists())
+        self.assertEqual(second.duration, 2)
+
+    def test_device_error_does_not_trigger_path_fallback(self):
+        def unavailable(command):
+            raise AudioDeviceError(281, 'device unavailable')
+        player = AudioPlayer(sender=unavailable)
+        with patch('harmonica_studio.playback.tempfile.TemporaryDirectory') as temporary:
+            with self.assertRaises(AudioDeviceError) as caught:
+                player.load(self.path)
+        self.assertEqual(caught.exception.code, 281)
+        temporary.assert_not_called()
+
+    def test_copy_failure_cleans_owned_directory(self):
+        player = AudioPlayer(sender=self.path_limited_sender)
+        with patch('harmonica_studio.playback.shutil.copyfile', side_effect=OSError('disk full')) as copy:
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                player.load(self.path)
+        self.assertFalse(copy.call_args.args[1].parent.exists())
+        self.assertIsNone(player._staged_audio)
+        self.assertIsNone(player.path)
+
+    def test_failed_device_initialization_cleans_staged_file(self):
+        self.backend.failure = 'set '
+        player = AudioPlayer(sender=self.path_limited_sender)
+        with self.assertRaisesRegex(RuntimeError, '测试音频设备错误'):
+            player.load(self.path)
+        opening = next(command for command in self.backend.commands if command.startswith('open '))
+        staged = Path(re.fullmatch(r'open "(.+)" type waveaudio alias (\w+)', opening).group(1))
+        self.assertFalse(staged.parent.exists())
+        self.assertFalse(self.backend.devices)
+        self.assertIsNone(player._staged_audio)
+
+    def test_failed_close_keeps_copy_until_device_can_release_it(self):
+        player = AudioPlayer(sender=self.path_limited_sender)
+        self.addCleanup(player.close)
+        player.load(self.path)
+        staged = Path(player._staged_audio.name)
+        self.backend.failure = 'close '
+        with self.assertRaises(RuntimeError):
+            player.close()
+        self.assertTrue(staged.exists())
+        self.backend.failure = None
+        player.close()
+        self.assertFalse(staged.exists())
 
     def test_native_error_is_readable(self):
         class FailingWinMM:

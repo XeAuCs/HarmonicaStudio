@@ -2,15 +2,12 @@
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 import json
-import math
 from pathlib import Path
 import uuid
 
 SCHEMA_VERSION = 1
 MAX_FILE_BYTES = 20 * 1024 * 1024
-MAX_NOTES = 100_000
-MAX_SECONDS = 1200
-TIME_EPSILON = 1e-8
+from .notes import MAX_NOTES, normalize_score_notes
 
 
 def make_project(notes, title='曲谱', source=None, options=None, report=None):
@@ -40,33 +37,7 @@ def validate_project(project):
     title = project.get('title', '曲谱')
     if not isinstance(title, str) or not title.strip() or len(title) > 200:
         raise ValueError('工程名称须为 1 至 200 个字符。')
-    notes = project.get('notes')
-    if not isinstance(notes, list) or len(notes) > MAX_NOTES:
-        raise ValueError('工程音符列表无效，最多支持 100000 个音符。')
-    normalized = []
-    for index, note in enumerate(notes, 1):
-        if not isinstance(note, dict):
-            raise ValueError(f'第 {index} 个音符格式无效。')
-        pitch, velocity = note.get('pitch'), note.get('velocity', 80)
-        start, end = note.get('start'), note.get('end')
-        if type(pitch) is not int or not 48 <= pitch <= 85:
-            raise ValueError(f'第 {index} 个音符超出口琴音域（48 至 85）。')
-        if type(velocity) is not int or not 1 <= velocity <= 127:
-            raise ValueError(f'第 {index} 个音符力度须为 1 至 127。')
-        if (type(start) not in (int, float) or type(end) not in (int, float)
-                or not 0 <= start < end <= MAX_SECONDS
-                or not math.isfinite(start) or not math.isfinite(end)):
-            raise ValueError(f'第 {index} 个音符时间无效，结束时间须晚于开始且在 20 分钟以内。')
-        normalized.append(dict(pitch=pitch, start=start, end=end, velocity=velocity))
-    normalized.sort(key=lambda n: (n['start'], n['pitch']))
-    for first, second in zip(normalized, normalized[1:]):
-        if first['end'] > second['start']:
-            # Snap arithmetic can differ by a few ULPs. Repair only that shared
-            # boundary; preserve every unaffected timestamp and reject real chords.
-            if first['end'] - second['start'] <= TIME_EPSILON and second['start'] > first['start']:
-                first['end'] = second['start']
-            else:
-                raise ValueError('音符存在重叠，请先将音符移开或缩短；口琴每次只能演奏一个音。')
+    normalized = normalize_score_notes(project.get('notes'), max_notes=MAX_NOTES)
     result = {'schema_version': SCHEMA_VERSION, 'title': title.strip(), 'notes': normalized}
     for name in ('source', 'options', 'report'):
         if name in project and project[name] is not None:

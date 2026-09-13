@@ -1,7 +1,7 @@
-param([string]$Report = '')
+﻿param([string]$Report = '', [string]$ExecutablePath = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $projectRoot 'app\HarmonicaStudio\HarmonicaStudio.exe'
+$exe = if ($ExecutablePath) { [System.IO.Path]::GetFullPath($ExecutablePath) } else { Join-Path $projectRoot 'app\HarmonicaStudio\HarmonicaStudio.exe' }
 if (-not $Report) { $Report = Join-Path $projectRoot 'verification\smoke.json' }
 $Report = [System.IO.Path]::GetFullPath($Report)
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Report) | Out-Null

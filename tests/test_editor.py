@@ -1,10 +1,12 @@
 """Interactive editor regressions; run with PySide6 installed and Qt offscreen."""
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 try:
-    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtCore import QPoint, QRectF, Qt
+    from PySide6.QtGui import QPainter
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from harmonica_studio.editor import NoteEditor
@@ -341,6 +343,36 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(self.editor._active_pitch(), 64)
         self.editor.set_position(None)
         self.assertIsNone(self.editor._active_pitch())
+
+    def test_white_key_text_stays_centered_inside_keys_at_different_pitch_zooms(self):
+        captured = {}
+
+        class RecordingPainter(QPainter):
+            def drawText(self, *args):
+                if len(args) == 3 and isinstance(args[0], QRectF):
+                    captured[args[2]] = (QRectF(args[0]), args[1])
+                return super().drawText(*args)
+
+        self.editor.resize(850, 500)
+        for row in (9, 10, 12, 20, 32):
+            with self.subTest(row=row):
+                self.editor.ROW = row
+                self.editor._update_ranges()
+                self.editor.verticalScrollBar().setValue((self.editor.HIGH - 79) * row)
+                self.app.processEvents()
+                captured.clear()
+                with patch('harmonica_studio.editor.QPainter', RecordingPainter):
+                    self.editor.viewport().grab()
+                white, _ = self.editor._piano_geometry()
+                for pitch in (71, 72, 76, 77):
+                    rect, alignment = captured[self.editor._pitch_label(pitch)]
+                    self.assertTrue(white[pitch].contains(rect))
+                    self.assertAlmostEqual(rect.center().y(), white[pitch].center().y())
+                    self.assertTrue(alignment & Qt.AlignVCenter)
+                    self.assertTrue(alignment & Qt.AlignHCenter)
+                for lower, higher in ((71, 72), (76, 77)):
+                    self.assertFalse(captured[self.editor._pitch_label(lower)][0].intersects(
+                        captured[self.editor._pitch_label(higher)][0]))
 
     def test_explicit_timeline_reset_returns_manually_browsed_score_to_start(self):
         original = self.editor.get_notes()

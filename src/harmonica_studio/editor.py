@@ -2,6 +2,7 @@
 from copy import deepcopy
 from bisect import bisect_left, bisect_right
 import math
+from .notes import MIN_PITCH, MAX_PITCH, MAX_SECONDS, normalize_score_notes
 
 from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, Qt, Signal, QSize
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
@@ -17,9 +18,9 @@ class NoteEditor(QAbstractScrollArea):
     LEFT = 136
     RULER = 28
     ROW = 20
-    LOW, HIGH = 48, 85
+    LOW, HIGH = MIN_PITCH, MAX_PITCH
     MIN_LENGTH = .025
-    MAX_TIME = 1200.0
+    MAX_TIME = MAX_SECONDS
     SNAP = .05
     DEFAULT_THEME = dict(bg='#F4F1EA', surface='#FCFAF5', ink='#292720',
                          muted='#6E695F', line='#CFC8BB', grid='#E5DED2',
@@ -137,8 +138,7 @@ class NoteEditor(QAbstractScrollArea):
 
     def set_notes(self, notes):
         """Load a document without emitting notesChanged or creating undo history."""
-        notes = sorted(deepcopy(notes), key=lambda n: (n['start'], n['pitch']))
-        self._validate(notes)
+        notes = normalize_score_notes(notes)
         self._notes = notes
         self._undo.clear()
         self._redo.clear()
@@ -245,32 +245,9 @@ class NoteEditor(QAbstractScrollArea):
             self._set_view_offset(max(bar.minimum(), min(bar.maximum(), seconds * self._zoom - (x - self.LEFT))))
         self.viewport().update()
 
-    def _validate(self, notes):
-        previous = None
-        for note in notes:
-            start, end, pitch = note['start'], note['end'], note['pitch']
-            if (isinstance(pitch, bool) or not isinstance(pitch, int)
-                    or not self.LOW <= pitch <= self.HIGH):
-                raise ValueError('音高需要在 C3 至 C♯6 之间。')
-            if (not isinstance(start, (int, float)) or not isinstance(end, (int, float))
-                    or not math.isfinite(start) or not math.isfinite(end)
-                    or start < 0 or end > self.MAX_TIME or end <= start):
-                raise ValueError('音符时长必须大于零，曲谱不能超过 20 分钟。')
-            velocity = note.get('velocity', 80)
-            if isinstance(velocity, bool) or not isinstance(velocity, int) or not 1 <= velocity <= 127:
-                raise ValueError('音符力度需要在 1 至 127 之间。')
-            if previous is not None and start < previous['end']:
-                if previous['end'] - start <= 1e-8 and start > previous['start']:
-                    # Match project validation for harmless floating-point joins.
-                    previous['end'] = start
-                else:
-                    raise ValueError('这里已有音符。口琴一次只能演奏一个音，请移到空白时间。')
-            previous = note
-
     def _commit(self, notes, selected=None):
-        notes = sorted(notes, key=lambda n: (n['start'], n['pitch']))
         try:
-            self._validate(notes)
+            notes = normalize_score_notes(notes)
         except ValueError as exc:
             self.message.emit(str(exc))
             self.viewport().update()
@@ -429,7 +406,9 @@ class NoteEditor(QAbstractScrollArea):
             painter.drawRect(rect)
             painter.setPen(QPen(colors['surface'], .8))
             painter.drawLine(QLineF(rect.left() + 1, rect.top() + 1, rect.right() - 1, rect.top() + 1))
-            center = self._pitch_center(pitch)
+            # E/F and B/C are adjacent semitones, so their white-key centers
+            # differ from the score-row centers. Label the actual key face.
+            center = rect.center().y()
             octave = pitch % 12 == 0
             if self.LOW <= pitch <= self.HIGH and (self.ROW >= 9 or octave):
                 name_font = painter.font()
@@ -437,7 +416,8 @@ class NoteEditor(QAbstractScrollArea):
                 name_font.setBold(octave or pitch == active)
                 painter.setFont(name_font)
                 painter.setPen(colors['accent'] if octave or pitch == active else colors['ink'])
-                painter.drawText(QRectF(66, center - 8, 28, 16), Qt.AlignVCenter | Qt.AlignHCenter, self._pitch_label(pitch))
+                painter.drawText(QRectF(66, rect.top(), 24, rect.height()),
+                                 Qt.AlignCenter | Qt.TextSingleLine, self._pitch_label(pitch))
                 if octave:
                     painter.fillRect(QRectF(91, center - min(7, self.ROW * .34), 3, min(14, self.ROW * .68)), colors['accent'])
                 painter.setFont(font)
@@ -474,7 +454,8 @@ class NoteEditor(QAbstractScrollArea):
             center = self._pitch_center(pitch)
             if self.RULER <= center <= height and (self.ROW >= 16 or pitch % 12 == 0):
                 painter.setPen(colors['accent'] if pitch == active else colors['muted'])
-                painter.drawText(QRectF(103, center - 8, self.LEFT - 105, 16), Qt.AlignVCenter, self._key_label(pitch))
+                painter.drawText(QRectF(100, center - 8, self.LEFT - 102, 16),
+                                 Qt.AlignCenter | Qt.TextSingleLine, self._key_label(pitch))
         painter.restore()
 
     def paintEvent(self, event):
@@ -557,7 +538,8 @@ class NoteEditor(QAbstractScrollArea):
         painter.setPen(colors['muted'])
         if not self._compact:
             painter.drawText(QRectF(8, 0, 90, self.RULER), Qt.AlignVCenter, '钢琴')
-            painter.drawText(QRectF(102, 0, self.LEFT - 102, self.RULER), Qt.AlignVCenter, '按键')
+            painter.drawText(QRectF(100, 0, self.LEFT - 102, self.RULER),
+                             Qt.AlignCenter | Qt.TextSingleLine, '按键')
         for i in range(start_tick, math.ceil((h + width - self.LEFT) / self._zoom / tick) + 1):
             x = self.LEFT + i * tick * self._zoom - h
             if x >= self.LEFT:

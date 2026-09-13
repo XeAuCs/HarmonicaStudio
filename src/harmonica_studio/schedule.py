@@ -1,11 +1,12 @@
 """Pitch mapping and physical-time input scheduling."""
+from .notes import MIN_PITCH, MAX_PITCH, MAX_SECONDS
 KEYS = ['SC02C', 'SC02C', 'SC02D', 'SC02D', 'SC02E', 'SC02F',
         'SC02F', 'SC030', 'SC030', 'SC031', 'SC031', 'SC032']
 SHARP = {1, 3, 6, 8, 10}
 
 
 def mapping(pitch):
-    if not 48 <= pitch <= 85:
+    if not MIN_PITCH <= pitch <= MAX_PITCH:
         raise ValueError('音高超出 C3 至 C6# 的映射范围。')
     pc = pitch % 12
     modifiers = []
@@ -34,7 +35,7 @@ def build_events(notes):
             next_onset = 100 + round(following['start'] * 1000)
             intended_end = min(intended_end, next_onset - 20 - (25 if next_mods else 0))
         end = max(onset + 25, intended_end)
-        if end > 1_200_000:
+        if end > MAX_SECONDS * 1000:
             raise ValueError('按键编排后超过 20 分钟，请减少音符或裁剪曲谱。')
         for mod in mods:
             events.append([onset-25, mod, 1])

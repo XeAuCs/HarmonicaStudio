@@ -6,13 +6,15 @@ def resource_root():
     return Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]
 
 
+def application_root():
+    """Portable files live beside the EXE; source runs use the repository."""
+    return Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else resource_root()
+
+
 def data_root():
     if os.environ.get('HARMONICA_STUDIO_HOME'):
         return Path(os.environ['HARMONICA_STUDIO_HOME']).resolve()
-    if getattr(sys, 'frozen', False):
-        exe = Path(sys.executable).parent
-        return exe.parent.parent / 'data' if exe.parent.name == 'app' else exe / 'data'
-    return resource_root() / 'data'
+    return application_root() / 'data'
 
 
 def template_path():
@@ -23,9 +25,22 @@ def icon_path():
 
 
 def default_library_root():
-    """Prefer the user's editable samples folder over frozen internal resources."""
-    if getattr(sys, 'frozen', False):
-        executable = Path(sys.executable).resolve()
-        if executable.parent.parent.name == 'app':
-            return executable.parent.parent.parent / 'samples'
-    return resource_root() / 'samples'
+    """One editable library, independent of the launcher's working directory."""
+    return application_root() / 'samples'
+
+
+def library_path(setting):
+    path = Path(setting) if setting else default_library_root()
+    return path if path.is_absolute() else application_root() / path
+
+
+def library_setting(folder):
+    if not folder:
+        return ''
+    path = library_path(folder).resolve()
+    if path == default_library_root().resolve():
+        return ''
+    try:
+        return str(path.relative_to(application_root().resolve()))
+    except ValueError:
+        return str(path)

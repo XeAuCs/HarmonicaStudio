@@ -3,7 +3,7 @@ from pathlib import Path
 root=Path(SPECPATH)
 a=Analysis([str(root/'launch.py')],pathex=[str(root/'src')],binaries=[],
     datas=[(str(root/'src/harmonica_studio/assets'),'harmonica_studio/assets'),
-           (str(root/'samples'),'samples'),(str(root/'third_party'),'third_party')],
+           (str(root/'third_party'),'third_party')],
     hiddenimports=[],hookspath=[],hooksconfig={},runtime_hooks=[],excludes=[],noarchive=False,optimize=0)
 # Qt on Windows imports the system ICU API. Some Python distributions ship an
 # incompatible ICU with the same filename; do not shadow Windows' implementation.

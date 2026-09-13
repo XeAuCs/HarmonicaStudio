@@ -4,11 +4,13 @@ __pycache__/
 build/
 dist/
 data/
-verification/
+verification/smoke-data/
+verification/*-data-*/
 backups/
 app/
 *.egg-info/
 .pytest_cache/
+verification/
 *.lnk
 *.exe
 *.log
