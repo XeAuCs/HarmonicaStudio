@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Original line drawing. Small ICO sizes use optically stronger strokes. -->
+  <g transform="rotate(-13 256 258)" stroke="#342F29" stroke-linejoin="round" stroke-linecap="round">
+    <rect x="51" y="156" width="410" height="197" rx="18" fill="#FCFAF5" stroke-width="12"/>
+    <path d="M57 219h398M58 324h396" fill="none" stroke-width="9"/>
+    <path d="M79 185h354" fill="none" stroke="#9F4937" stroke-width="9"/>
+    <g fill="none" stroke-width="12">
+      <rect x="79" y="242" width="41" height="57" rx="4"/>
+      <rect x="142" y="242" width="41" height="57" rx="4"/>
+      <rect x="205" y="242" width="41" height="57" rx="4"/>
+      <rect x="268" y="242" width="41" height="57" rx="4"/>
+      <rect x="331" y="242" width="41" height="57" rx="4"/>
+      <rect x="394" y="242" width="39" height="57" rx="4"/>
+    </g>
+  </g>
+</svg>
