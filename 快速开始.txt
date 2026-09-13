@@ -1,4 +1,4 @@
-口琴工坊 · Harmonica Studio 1.4.8
+口琴工坊 · Harmonica Studio 1.4.9
 
 双击本目录带口琴图标的「口琴工坊」快捷方式，或「启动口琴工坊.cmd」。
 无需另装 Python 或 AutoHotkey。

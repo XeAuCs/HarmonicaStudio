@@ -13,6 +13,7 @@ from .library import sample_entries
 from .melody import rank_parts
 from .midi import read_midi
 from .models import Options
+from .metrics import measured
 from .paths import data_root, library_path, library_setting
 from .playback import AudioPlayer, ScriptPlayer
 from .preferences import load_preferences, save_preferences
@@ -23,14 +24,16 @@ from .transport import PlaybackClock, TimeMap, playback_anchors
 
 
 class AppController:
-    def __init__(self, home=None, *, audio=None, player=None, executor=None, clock=None):
+    def __init__(self, home=None, *, audio=None, player=None, executor=None, clock=None,
+                 metrics=None, before_work=None):
         self.home = Path(home or data_root())
         self.home.mkdir(parents=True, exist_ok=True)
         self.state = AppState()
+        self.metrics = metrics
         self.preferences = load_preferences(self.home / 'preferences.json')
         self.audio = audio if audio is not None else AudioPlayer()
         self.player = player if player is not None else ScriptPlayer(self.home / 'control')
-        self.jobs = JobRunner(executor)
+        self.jobs = JobRunner(executor, metrics=metrics, before_work=before_work)
         self.clock = clock if clock is not None else PlaybackClock()
         self.time_anchors = []
         self.to_audio = TimeMap()
@@ -79,6 +82,7 @@ class AppController:
     def library_root(self):
         return library_path(self.preferences.library_folder)
 
+    @measured
     def refresh_library(self):
         self.library = sample_entries(self.library_root())
         self.emit('library')
@@ -113,17 +117,20 @@ class AppController:
         self.audio.close()
         self.player.stop()
 
+    @measured
     def preserve_current(self):
         if self.state.project_dirty:
             name = datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6] + '.hstudio'
             save_project(self.home / 'recovery' / name, self.state.project)
             self.autosave()
 
+    @measured
     def autosave(self):
         if self.state.project is not None:
             save_project(self.home / 'autosave.hstudio', self.state.project)
         self.emit('changed')
 
+    @measured
     def open_project(self, path):
         self._idle()
         project = load_project(path)
@@ -139,6 +146,7 @@ class AppController:
         self.status('工程已打开。音符可继续编辑；点试听会生成最新结果。')
         self.emit('changed')
 
+    @measured
     def load_file(self, path, sample_options=None, *, prepare=False, autoplay=False, remote=False):
         self._idle()
         self.preserve_current()
@@ -158,6 +166,7 @@ class AppController:
         self.status('正在读取曲谱…')
         self.emit('changed')
 
+    @measured
     def install_parts(self, parts, names):
         s = self.state
         s.parts, s.names = parts, names
@@ -173,6 +182,7 @@ class AppController:
             raise ValueError('请先选择一个声部。')
         return Options(track=key[0], channel=key[1], skip_long_rests=self.preferences.skip_long_rests)
 
+    @measured
     def begin_convert(self, options=None, *, follow_up=FollowUp.NONE, remote=False, persist=False):
         self._idle()
         if self.state.source is None:
@@ -189,6 +199,7 @@ class AppController:
         self.status('正在提取旋律并制作试听…')
         self.emit('changed')
 
+    @measured
     def save_to(self, path):
         self._idle()
         path = Path(path)
@@ -200,6 +211,7 @@ class AppController:
         self.autosave()
         self.status('工程已保存：' + str(path))
 
+    @measured
     def replace_notes(self, notes):
         self._idle()
         s = self.state
@@ -241,6 +253,7 @@ class AppController:
             self.emit('autosave')
         self.emit('changed')
 
+    @measured
     def begin_export(self, *, follow_up=FollowUp.NONE, remote=False):
         self._idle()
         if self.state.project is None:
@@ -258,6 +271,7 @@ class AppController:
         self.status('正在为修改后的旋律生成试听、MIDI 和脚本…')
         self.emit('changed')
 
+    @measured
     def show_result(self, folder, report, replace_project=False):
         folder = Path(folder)
         project = load_project(folder / '工程.hstudio')
@@ -284,6 +298,7 @@ class AppController:
         s.preview_duration = self.audio.duration
         self.seek_score(s.logical_seek)
 
+    @measured
     def poll(self):
         if self.state.closed:
             return
@@ -295,11 +310,13 @@ class AppController:
             self.report_error(exc)
         job = self.jobs.take_completed()
         if job:
+            outcome = 'ok'
             try:
                 result = job.future.result()
                 if job.cancel.is_set():
                     raise InterruptedError('转换已取消。')
                 if job.revision != self.state.revision:
+                    outcome = 'stale'
                     self.status('工程已变化，已忽略旧任务结果。')
                 elif job.kind == JobKind.LOAD:
                     self.install_parts(*result)
@@ -312,9 +329,15 @@ class AppController:
                     elif job.follow_up in (FollowUp.GAME, FollowUp.ARM):
                         self.game_play(remote=job.remote, arm=job.follow_up == FollowUp.ARM)
             except InterruptedError:
+                outcome = 'cancelled'
                 self.status('已取消；可以继续编辑或重新导出。')
             except Exception as exc:
+                outcome = 'error'
                 self.report_error(exc, remote=job.remote)
+            finally:
+                if self.metrics is not None:
+                    self.metrics.record('job.result', 0, outcome=outcome,
+                                        job=job.number, kind=job.kind.value, revision=job.revision)
         self.emit('changed')
 
     def seek_score(self, seconds):

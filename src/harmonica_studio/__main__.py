@@ -8,6 +8,13 @@ def main():
     parser.add_argument('--remote',action='store_true',help='打开桌面界面并显示手机连接二维码')
     sub=parser.add_subparsers(dest='command')
     sub.add_parser('gui',help='打开桌面界面')
+    diagnose=sub.add_parser('diagnose',help='使用合成数据测量控制层和 Qt 响应，输出 JSON')
+    from .performance import add_arguments, argument_error
+    add_arguments(diagnose)
+    if len(sys.argv)>1 and sys.argv[1]=='diagnose':
+        parser.error=argument_error
+        if hasattr(sys.stdout,'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
     inspect=sub.add_parser('inspect',help='查看音轨信息');inspect.add_argument('file')
     convert=sub.add_parser('convert',help='转换 MIDI');convert.add_argument('file');convert.add_argument('--out',default='data/exports')
     convert.add_argument('--speed',type=float,default=1);convert.add_argument('--transpose',type=int,default=0)
@@ -17,6 +24,9 @@ def main():
     convert.add_argument('--phrase-octave',action='store_true',help='超出音域时允许按乐句调整八度')
     convert.add_argument('--skip-long-rests',action='store_true',help='将音符之间超过 3 秒的空白缩短为 0.6 秒')
     args=parser.parse_args()
+    if args.command=='diagnose':
+        from .performance import run_cli
+        return run_cli(args)
     if args.command in (None,'gui'):
         from .storage import configure_logging
         from .paths import data_root

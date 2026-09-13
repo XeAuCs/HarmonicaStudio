@@ -4,6 +4,8 @@
 
 本项目采用模块化单体。桌面通过轻量 MVP 适配，手机通过 HTTP 适配器访问同一个应用控制层。
 
+控制层可通过可选 `metrics` 注入耗时记录，通过 `before_work(kind, cancel_event)` 注入后台测试钩子；默认均关闭。`diagnose` CLI 在隔离进程中用合成数据驱动同一控制层，支持 Qt 事件循环延迟测量、可取消延迟和 JSON 报告。指标含义、超时、数据隔离及命令见 [性能诊断](diagnostics.md)。
+
 ```mermaid
 flowchart TD
     GUI[Qt MainWindow] --> Presenter[DesktopPresenter]
