@@ -12,6 +12,7 @@ class Preferences:
     compact: bool = False
     library_folder: str = ''
     skip_long_rests: bool = True
+    start_from_highlight: bool = False
 
 
 def load_preferences(path):
@@ -23,10 +24,12 @@ def load_preferences(path):
         compact = data.get('compact', False)
         folder = data.get('library_folder', '')
         skip = data.get('skip_long_rests', True)
+        highlight = data.get('start_from_highlight', False)
         return Preferences(theme=theme if theme in THEME_KEYS else 'paper',
                            compact=compact if type(compact) is bool else False,
                            library_folder=folder if isinstance(folder, str) and '\0' not in folder else '',
-                           skip_long_rests=skip if type(skip) is bool else True)
+                           skip_long_rests=skip if type(skip) is bool else True,
+                           start_from_highlight=highlight if type(highlight) is bool else False)
     except (OSError, ValueError, TypeError):
         return Preferences()
 

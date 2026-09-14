@@ -4,14 +4,16 @@ from bisect import bisect_left, bisect_right
 import math
 from .notes import MIN_PITCH, MAX_PITCH, MAX_SECONDS, normalize_score_notes
 
-from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, Qt, Signal, QSize
+from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, Qt, Signal, QSize, QSignalBlocker
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QToolTip
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QToolTip
 
 
 class NoteEditor(QAbstractScrollArea):
     notesChanged = Signal(list)
     seekRequested = Signal(float)
+    scrubStarted = Signal()
+    scrubMoved = Signal(float)
     message = Signal(str)
     historyChanged = Signal(bool, bool)
 
@@ -33,6 +35,8 @@ class NoteEditor(QAbstractScrollArea):
         self._undo, self._redo = [], []
         self._selected = None
         self._drag = None
+        self._pan = None
+        self._navigation_enabled = True
         self._read_only = False
         self._compact = False
         self._fit_pitch_mode = False
@@ -40,14 +44,16 @@ class NoteEditor(QAbstractScrollArea):
         self._theme = {key: QColor(value) for key, value in self.DEFAULT_THEME.items()}
         self._zoom = 70.0
         self._position = None
+        self._highlight = None
         self._view_offset = 0.0
         self._syncing_scroll = False
         self._duration = 0.0
         self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMinimumHeight(245)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAccessibleName('可编辑口琴曲谱')
-        self.setToolTip('方块内的字母表示演奏按键。悬停查看音高、按键和时间；拖动音符编辑，点击上方时间尺试听。')
+        self.setToolTip('拖动谱面空白或时间尺移动，自动暂停；中键可在任意音符处拖动。完整模式拖动音符仍为编辑，精简模式可直接拖动音轨。')
         self.viewport().setMouseTracking(True)
         self.horizontalScrollBar().valueChanged.connect(self._manual_scroll)
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
@@ -68,6 +74,16 @@ class NoteEditor(QAbstractScrollArea):
     def _editable(self):
         return not self._read_only and not self._compact
 
+    @property
+    def is_scrubbing(self):
+        return self._pan is not None and self._pan['moved']
+
+    def set_navigation_enabled(self, enabled):
+        self._navigation_enabled = bool(enabled)
+        if not enabled:
+            self._pan = None
+            self.viewport().unsetCursor()
+
     def set_theme(self, palette):
         """Accept color values from theme_palette(); unknown metadata is ignored."""
         for key in self.DEFAULT_THEME:
@@ -85,7 +101,7 @@ class NoteEditor(QAbstractScrollArea):
         compact = bool(compact)
         if compact == self._compact:
             return
-        self._drag = self._selected = None
+        self._pan = self._drag = self._selected = None
         self._compact = compact
         if compact:
             self._pitch_view_before_compact = (self.ROW, self.verticalScrollBar().value(), self._fit_pitch_mode)
@@ -142,7 +158,7 @@ class NoteEditor(QAbstractScrollArea):
         self._notes = notes
         self._undo.clear()
         self._redo.clear()
-        self._selected = self._drag = self._position = None
+        self._pan = self._selected = self._drag = self._position = None
         self._view_offset = 0.0
         self._duration = 0.0
         self._update_ranges()
@@ -162,6 +178,10 @@ class NoteEditor(QAbstractScrollArea):
         self.viewport().update()
 
     def set_position(self, seconds, duration=0):
+        # Device polling must not fight the local gesture. Audio seeks once,
+        # on release; the roll itself follows the pointer at subpixel precision.
+        if self.is_scrubbing:
+            return
         was_following = self._position is not None
         self._position = None if seconds is None else max(0.0, min(self.MAX_TIME, float(seconds)))
         if duration and duration != self._duration:
@@ -180,17 +200,16 @@ class NoteEditor(QAbstractScrollArea):
 
     def reset_timeline(self):
         """Explicit transport stop; keep pitch zoom, selection and score intact."""
-        self._position = None
+        self._pan = self._position = None
         self._set_view_offset(0.0)
 
     def _set_view_offset(self, value):
         """Keep subpixel motion independent of the integer scrollbar thumb."""
         self._view_offset = float(value)
-        self._syncing_scroll = True
-        try:
+        # Keep the hidden scrollbar available for keyboard/wheel navigation,
+        # without invoking scrollContentsBy and valueChanged on every frame.
+        with QSignalBlocker(self.horizontalScrollBar()):
             self.horizontalScrollBar().setValue(round(value))
-        finally:
-            self._syncing_scroll = False
         self.viewport().update()
 
     def _manual_scroll(self, value):
@@ -458,6 +477,11 @@ class NoteEditor(QAbstractScrollArea):
                                  Qt.AlignCenter | Qt.TextSingleLine, self._key_label(pitch))
         painter.restore()
 
+    def set_highlight(self, seconds):
+        if self._highlight != seconds:
+            self._highlight = seconds
+            self.viewport().update()
+
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing)
@@ -525,6 +549,10 @@ class NoteEditor(QAbstractScrollArea):
                 painter.setPen(QPen(colors['ink'], .8))
                 painter.drawLine(QLineF(rect.right() - 3, rect.top() + 3,
                                        rect.right() - 3, rect.bottom() - 3))
+        if self._highlight is not None:
+            x = self.LEFT + self._highlight * self._zoom - h
+            painter.setPen(QPen(colors['accent'], 1.5, Qt.DashLine))
+            painter.drawLine(QLineF(x, self.RULER, x, height))
         if self._position is not None:
             x = self.LEFT + self._position * self._zoom - h
             painter.setPen(QPen(colors['playhead'], 1.25))
@@ -582,15 +610,21 @@ class NoteEditor(QAbstractScrollArea):
         return super().viewportEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton:
+        if event.button() not in (Qt.LeftButton, Qt.MiddleButton):
             return super().mousePressEvent(event)
         self.setFocus(Qt.MouseFocusReason)
         pos = event.position()
-        if pos.y() < self.RULER and pos.x() >= self.LEFT:
-            seconds = self._time_at(pos.x())
-            end = max((n['end'] for n in self._notes), default=0)
-            if self._notes:
-                self.seekRequested.emit(min(seconds, end))
+        ruler = pos.y() < self.RULER and pos.x() >= self.LEFT
+        index = self._hit(pos)
+        if (self._navigation_enabled and self._notes and pos.x() >= self.LEFT
+                and (event.button() == Qt.MiddleButton or ruler or index is None or not self._editable)):
+            self._pan = dict(x=pos.x(), moved=False, button=event.button(),
+                             ruler=ruler, click_time=self._time_at(pos.x()))
+            self._selected = None
+            self.viewport().update()
+            event.accept()
+            return
+        if event.button() != Qt.LeftButton or ruler:
             return
         self._selected = None if self._compact else self._hit(pos)
         if self._selected is not None and self._editable:
@@ -605,6 +639,28 @@ class NoteEditor(QAbstractScrollArea):
 
     def mouseMoveEvent(self, event):
         pos = event.position()
+        if self._pan is not None:
+            pan = self._pan
+            dx = pos.x() - pan['x']
+            if not pan['moved']:
+                if abs(dx) < QApplication.startDragDistance():
+                    return
+                # Capture the displayed offset before pause reports the device
+                # position, so picking up a moving roll does not jump backwards.
+                pan['offset'] = self._view_offset
+                pan['end'] = self._duration or max(n['end'] for n in self._notes)
+                pan['moved'] = True
+                self.scrubStarted.emit()
+                if self._pan is not pan:
+                    return
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            position = max(0.0, min(pan['end'],
+                           (pan['offset'] - dx + self._timeline_width() / 2) / self._zoom))
+            self._position = position
+            self._set_view_offset(position * self._zoom - self._timeline_width() / 2)
+            self.scrubMoved.emit(position)
+            event.accept()
+            return
         if self._drag and self._editable:
             drag = self._drag
             dx = pos.x() - drag['x'] + self._view_offset - drag['scroll_x']
@@ -633,10 +689,23 @@ class NoteEditor(QAbstractScrollArea):
             self.viewport().setCursor(Qt.SizeHorCursor if rect.right() - pos.x() <= min(7, rect.width() * .3) else Qt.SizeAllCursor)
         elif pos.y() < self.RULER and pos.x() >= self.LEFT and self._notes:
             self.viewport().setCursor(Qt.PointingHandCursor)
+        elif self._navigation_enabled and self._notes and pos.x() >= self.LEFT:
+            self.viewport().setCursor(Qt.OpenHandCursor)
         else:
             self.viewport().unsetCursor()
 
     def mouseReleaseEvent(self, event):
+        if self._pan is not None and event.button() == self._pan['button']:
+            pan, self._pan = self._pan, None
+            self.viewport().unsetCursor()
+            if pan['moved']:
+                self.seekRequested.emit(self._position)
+            elif pan['ruler'] and event.button() == Qt.LeftButton:
+                end = self._duration or max(n['end'] for n in self._notes)
+                self.seekRequested.emit(min(pan['click_time'], end))
+            self.viewport().update()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._drag:
             drag = self._drag
             self._drag = None
@@ -652,7 +721,7 @@ class NoteEditor(QAbstractScrollArea):
         if event.button() != Qt.LeftButton or not self._editable:
             return super().mouseDoubleClickEvent(event)
         pos = event.position()
-        self._drag = None
+        self._pan = self._drag = None
         if pos.x() < self.LEFT or pos.y() < self.RULER or self._hit(pos) is not None:
             return
         start = round(self._time_at(pos.x()) / self.SNAP) * self.SNAP

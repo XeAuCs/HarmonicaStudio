@@ -160,12 +160,12 @@ def self_test(report_path):
         edited_notes=deepcopy(window.controller.state.project['notes']);expected=deepcopy(original_notes);expected[0]['pitch']+=1
         assert edited_notes==expected,(edited_notes[0],expected[0])
         assert window.controller.state.export_dirty and window.controller.state.project_dirty
-        assert not window.arm_button.isEnabled() and not window.folder_button.isEnabled()
+        assert window.arm_button.isEnabled() and not window.controller.capabilities()['current_export']
         assert not window.controller.audio.fail_next_close and window.controller.state.preview_duration==0
         # Even a failing device close cannot lose the edit or re-enable stale exports.
         window.controller.audio.close();assert window.controller.audio.path is None
-        window.undo_button.click();assert window.controller.state.project['notes']==original_notes
-        window.redo_button.click();assert window.controller.state.project['notes']==edited_notes
+        QTest.keyClick(window.roll,Qt.Key_Z,Qt.ControlModifier);assert window.controller.state.project['notes']==original_notes
+        QTest.keyClick(window.roll,Qt.Key_Y,Qt.ControlModifier);assert window.controller.state.project['notes']==edited_notes
         checks.extend(['Qt mouse gesture changes pitch while preserving exact timing',
             'edits invalidate stale audio and script actions even when audio close fails',
             'undo and redo through UI'])
@@ -241,18 +241,18 @@ def self_test(report_path):
         assert window.controller.audio.playing and window.controller.state.transport=='playing'
         checks.append('progress slider drag seeks and continues playback')
 
-        window.quiet_button.click()
+        window.stop_listening()
         assert window.controller.audio.position==0 and not window.controller.audio.playing
         assert window.playback_progress.value()==0 and window.roll._position is None
         window.listen_button.click();window.controller.audio.advance(window.controller.audio.duration+1);window.poll()
         assert window.controller.state.transport=='ended' and window.playback_state.text()=='已结束'
         assert window.playback_progress.value()==window.playback_progress.maximum()
         window.listen_button.click();assert window.controller.audio.playing and window.controller.audio.position==0
-        window.quiet_button.click()
+        window.stop_listening()
         checks.append('stop resets cursor; natural completion and replay work')
 
         # Re-export must not bake the 100 ms physical lead-in into editable time.
-        window.export_button.click();finish(window);repeated_folder,report=window.controller.state.result
+        window.begin_export();finish(window);repeated_folder,report=window.controller.state.result
         assert repeated_folder!=edited_folder and window.controller.state.project['notes']==edited_notes
         assert load_project(repeated_folder/'工程.hstudio')['notes']==edited_notes
         assert json.loads((repeated_folder/'音符.json').read_text(encoding='utf-8'))==actual_notes
@@ -261,9 +261,10 @@ def self_test(report_path):
 
         window.listen_button.click();window.seek_editor(16.0);window.poll();app.processEvents();assert_centered(window.roll)
         screenshot=report_path.with_suffix('.png');assert window.grab().save(str(screenshot))
-        assert window.arm_button.isEnabled() and window.folder_button.isEnabled()
+        assert window.arm_button.isEnabled() and window.controller.capabilities()['current_export']
         window.close();finish(window);assert window.controller.audio.path is None and not window.controller.audio.playing
-        restored=create_window();assert restored.restore_button.isEnabled();restored.restore_button.click()
+        restored=create_window();assert (restored.controller.home/'autosave.hstudio').is_file()
+        restored.open_project(restored.controller.home/'autosave.hstudio')
         assert restored.controller.state.project['notes']==edited_notes and restored.roll.get_notes()==edited_notes
         assert restored.controller.state.source is None and not restored.controller.state.project_dirty
         assert not errors,errors
@@ -303,7 +304,7 @@ def self_test(report_path):
         assert restored.playback_progress.value()>start
         restored.pause_button.click();paused=restored.playback_progress.value();QTest.qWait(50)
         assert restored.playback_progress.value()==paused and not restored.animation_timer.isActive()
-        restored.quiet_button.click()
+        restored.stop_listening()
         restored.seek_editor(80.0);assert_centered(restored.roll)
         song_screenshot=report_path.with_name(report_path.stem+'-haruhikage.png')
         app.processEvents();assert restored.grab().save(str(song_screenshot))

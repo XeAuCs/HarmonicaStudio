@@ -211,6 +211,7 @@ class ScriptPlayer:
         self._instance_dir=None
         self._script_signature=None
         self._command_id=0
+        self._start_ms=0
         self._stopping=False
         self._pending_play=None
         self._last_status=self._snapshot('idle',message='演奏器未启动。')
@@ -272,24 +273,38 @@ class ScriptPlayer:
         self._instance_dir=None
         self._script_signature=None
 
-    def _command(self,action):
+    def _command(self,action,*,start_ms=None):
         if not self.alive or self.command_file is None or self._stopping:
             return
         request_id=self._command_id+1
         temporary=self.command_file.with_name('command.'+uuid.uuid4().hex+'.tmp')
         try:
-            temporary.write_text(json.dumps(dict(id=request_id,action=action)),encoding='utf-8')
+            command=dict(id=request_id,action=action)
+            if start_ms is not None:command['start_ms']=start_ms
+            temporary.write_text(json.dumps(command),encoding='utf-8')
             os.replace(temporary,self.command_file)
         finally:
             temporary.unlink(missing_ok=True)
         self._command_id=request_id
+        if start_ms is not None:self._start_ms=start_ms
         self._last_status=self._snapshot('ready',duration=self._last_status['duration'],
                                         message='正在请求开始演奏。' if action=='play' else '已请求停止演奏。')
 
-    def start(self,script):
+    @staticmethod
+    def _start_offset(script, seconds):
+        from .notes import MAX_SECONDS
+        if type(seconds) not in (int,float) or not 0 <= seconds <= MAX_SECONDS or not math.isfinite(seconds):
+            raise ValueError('演奏起点超出有效范围。')
+        milliseconds=round(seconds*1000)
+        if milliseconds and b'; Harmonica Studio start offset: 1' not in script.read_bytes():
+            raise RuntimeError('这份演奏脚本不支持心动片段起点，请重新导出曲谱。')
+        return milliseconds
+
+    def start(self,script,*,start_seconds=0):
         if self.alive:
             raise RuntimeError('已有演奏器在运行，请先停止它。')
         signature=self._signature(script)
+        start_ms=self._start_offset(signature[0],start_seconds)
         exe=resource_root()/'third_party/AutoHotkey/AutoHotkey64.exe'
         if not exe.is_file():
             raise RuntimeError('缺少 AutoHotkey 运行文件，请查看工程 README 的运行环境说明。')
@@ -297,6 +312,7 @@ class ScriptPlayer:
         self._pending_play=None
         self._stopping=False
         self._command_id=0
+        self._start_ms=start_ms
         self.control_dir.mkdir(parents=True,exist_ok=True)
         self._instance_dir=self.control_dir/uuid.uuid4().hex
         self._instance_dir.mkdir()
@@ -304,8 +320,10 @@ class ScriptPlayer:
         self.command_file=self._instance_dir/'command.json'
         self.status_file=self._instance_dir/'status.json'
         try:
-            self.process=subprocess.Popen([str(exe),'/ErrorStdOut',str(signature[0]),str(self.stop_file),
-                                           str(self.command_file),str(self.status_file)],
+            arguments=[str(exe),'/ErrorStdOut',str(signature[0]),str(self.stop_file),
+                       str(self.command_file),str(self.status_file)]
+            if start_ms:arguments.append(str(start_ms))
+            self.process=subprocess.Popen(arguments,
                                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0)
         except OSError as exc:
@@ -315,22 +333,23 @@ class ScriptPlayer:
         self._script_signature=signature
         self._last_status=self._snapshot('ready',message='演奏器已就绪；切到口琴界面按 F6 或从手机开始。')
 
-    def play(self,script):
+    def play(self,script,*,start_seconds=0):
         """Request play without toggling a running song into a stop.
 
         A changed score restarts the process cooperatively. The caller's normal
         reap() timer finishes that restart once the old process releases input.
         """
         signature=self._signature(script)
+        start_ms=self._start_offset(signature[0],start_seconds)
         if b'; Harmonica Studio remote protocol: 1' not in signature[0].read_bytes():
             raise RuntimeError('这份演奏脚本来自旧版本，请重新导出曲谱后再从手机开始。')
         if self.alive and (self._stopping or signature != self._script_signature):
             self.stop()
-            self._pending_play=signature[0]
+            self._pending_play=(signature[0],start_seconds)
             return
         if not self.alive:
-            self.start(signature[0])
-        self._command('play')
+            self.start(signature[0],start_seconds=start_seconds)
+        self._command('play',start_ms=start_ms if start_ms or self._start_ms else None)
 
     def stop_playback(self):
         """Stop and rewind input while leaving an armed process available."""
@@ -356,4 +375,4 @@ class ScriptPlayer:
             self._last_status=self._snapshot('idle',duration=self._last_status['duration'],
                                             message='演奏器已退出。' if not code else '演奏器异常退出，请重新生成曲谱后再试。')
             if pending is not None:
-                self.play(pending)
+                self.play(pending[0],start_seconds=pending[1])

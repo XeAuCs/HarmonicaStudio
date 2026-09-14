@@ -314,8 +314,9 @@ def _run_once(root, config, app):
         snapshot = metrics.snapshot()
         controller.metrics = controller.jobs.metrics = controller.library_scanner.jobs.metrics = controller.saves.jobs.metrics = None
         if scenario == 'autosave':
-            if load_project(home / 'autosave.hstudio')['notes'] != edited or not controller.state.project_dirty:
-                raise AssertionError('自动保存的内容或手动保存状态错误。')
+            if (load_project(home / 'autosave.hstudio')['notes'] != edited
+                    or load_project(project)['notes'] != edited or controller.state.project_dirty):
+                raise AssertionError('自动工程、恢复暂存或保存版本状态错误。')
         if snapshot['dropped_samples']:
             raise RuntimeError('测量样本超出容量，请缩短单次诊断时间。')
         return dict(ok=True, elapsed_ms=elapsed * 1000, metrics=snapshot)

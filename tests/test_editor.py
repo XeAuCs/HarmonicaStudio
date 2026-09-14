@@ -135,6 +135,9 @@ class EditorTests(unittest.TestCase):
         self.editor.delete_selected()
         self.assertEqual(self.editor.get_notes(), original)
         self.assertFalse(self.editor.can_undo)
+        self.assertEqual(len(self.seeks), 1)  # Read-only notes drag the timeline.
+        self.editor.reset_timeline()
+        self.seeks.clear()
         QTest.mouseClick(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(self.editor.LEFT + 70, 10))
         self.assertEqual(self.seeks, [1.0])
 
@@ -142,6 +145,82 @@ class EditorTests(unittest.TestCase):
         QTest.mouseClick(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(self.editor.LEFT + 500, 10))
         self.assertEqual(self.seeks, [1.7])
         self.assertFalse(self.changed)
+
+    def test_compact_pan_pauses_once_and_commits_only_on_release(self):
+        self.editor.set_notes([note(60, 0, 1), note(64, 20, 21)])
+        self.editor.set_compact(True)
+        self.editor.set_position(10, 21)
+        pauses, previews = [], []
+        self.editor.scrubStarted.connect(lambda: pauses.append(True))
+        self.editor.scrubMoved.connect(previews.append)
+        start = QPoint(400, 90)
+        QTest.mousePress(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        for dx in (20, 40, 70):
+            QTest.mouseMove(self.editor.viewport(), start - QPoint(dx, 0))
+        self.assertEqual(pauses, [True])
+        self.assertFalse(self.seeks)
+        self.assertAlmostEqual(previews[-1], 11)
+        self.editor.set_position(10, 21)  # A device report cannot pull the roll back.
+        self.assertAlmostEqual(self.editor._position, 11)
+        QTest.mouseRelease(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, start - QPoint(70, 0))
+        self.assertEqual(self.seeks, [11])
+        self.assertFalse(self.changed)
+        self.assertFalse(self.editor.can_undo)
+
+    def test_pan_clamps_at_song_boundaries(self):
+        self.editor.set_compact(True)
+        for initial, delta, expected in ((.5, 500, 0), (.5, -500, 1.7)):
+            self.editor.set_position(initial, 1.7)
+            self.drag(QPoint(400, 90), QPoint(400 + delta, 90))
+            self.assertAlmostEqual(self.seeks[-1], expected)
+
+    def test_ruler_click_still_seeks_but_drag_moves_without_initial_seek(self):
+        self.editor.set_notes([note(60, 0, 1), note(64, 20, 21)])
+        self.editor.set_position(10, 21)
+        start = QPoint(400, 10)
+        QTest.mousePress(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        self.assertFalse(self.seeks)
+        QTest.mouseMove(self.editor.viewport(), start - QPoint(70, 0))
+        self.assertFalse(self.seeks)
+        QTest.mouseRelease(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, start - QPoint(70, 0))
+        self.assertEqual(self.seeks, [11])
+
+    def test_middle_button_pans_over_editable_note_without_editing(self):
+        start = self.at_note(0)
+        QTest.mousePress(self.editor.viewport(), Qt.MiddleButton, Qt.NoModifier, start)
+        QTest.mouseMove(self.editor.viewport(), start - QPoint(70, 0))
+        QTest.mouseRelease(self.editor.viewport(), Qt.MiddleButton, Qt.NoModifier, start - QPoint(70, 0))
+        self.assertEqual(len(self.seeks), 1)
+        self.assertFalse(self.changed)
+
+    def test_disabled_navigation_and_replacing_document_cancel_pan(self):
+        self.editor.set_compact(True)
+        self.editor.set_navigation_enabled(False)
+        self.drag(QPoint(400, 90), QPoint(330, 90))
+        self.assertFalse(self.seeks)
+        self.editor.set_navigation_enabled(True)
+        QTest.mousePress(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(400, 90))
+        QTest.mouseMove(self.editor.viewport(), QPoint(330, 90))
+        self.assertTrue(self.editor.is_scrubbing)
+        self.editor.set_notes([note(60, 0, 1)])
+        QTest.mouseRelease(self.editor.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(330, 90))
+        self.assertFalse(self.seeks)
+        self.assertFalse(self.editor.is_scrubbing)
+
+    def test_hidden_scrollbar_does_not_dispatch_scroll_work_per_frame(self):
+        bar = self.editor.horizontalScrollBar()
+        signals = []
+        bar.valueChanged.connect(signals.append)
+        for compact in (False, True):
+            self.editor.set_compact(compact)
+            self.app.processEvents()
+            self.assertFalse(bar.isVisible())
+            signals.clear()
+            self.editor.set_position(1, 1.7)
+            previous = self.editor._view_offset
+            self.editor.set_position(1.001, 1.7)
+            self.assertAlmostEqual(self.editor._view_offset - previous, .001 * self.editor._zoom)
+            self.assertFalse(signals)
 
     def test_zoom_and_playback_follow_keep_notes_unchanged(self):
         original = [note(60, 0, 1), note(64, 40, 41)]

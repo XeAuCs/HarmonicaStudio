@@ -191,6 +191,16 @@ class SettingsWorkflowTests(unittest.TestCase):
         self.assertEqual(dialog.preferences().library_folder,'')
         dialog.deleteLater()
 
+    def test_highlight_setting_is_explicit_and_roundtrips_without_changing_rest_preference(self):
+        preferences=Preferences(start_from_highlight=True,skip_long_rests=False)
+        dialog=SettingsDialog(preferences,self.home,parent=self.window)
+        self.assertTrue(dialog.start_from_highlight.isChecked())
+        self.assertFalse(dialog.preferences().skip_long_rests)
+        self.assertTrue(dialog.preferences().start_from_highlight)
+        dialog.start_from_highlight.setChecked(False)
+        self.assertFalse(dialog.preferences().start_from_highlight)
+        dialog.deleteLater()
+
     def test_long_rests_reexport_current_score_and_restore_without_changing_notes(self):
         from harmonica_studio.project import make_project,save_project
         notes=[dict(start=0,end=5,pitch=60,velocity=80),

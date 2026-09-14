@@ -109,6 +109,66 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertFalse(any(call[0] == 'play' for call in self.audio.calls))
         self.assertFalse(any(call[0] == 'play' for call in self.player.calls))
 
+    def test_drag_roll_pauses_preview_seeks_once_and_resumes_from_release(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        window, c = self.window, self.window.controller
+        notes = [dict(pitch=60 + i % 12, start=i * .5, end=i * .5 + .4, velocity=80)
+                 for i in range(24)]
+        save_project(self.source, make_project(notes, '拖动测试'))
+        window.open_project(self.source)
+        window.listen()
+        self.finish_next()
+        for compact in (True, False):
+            with self.subTest(compact=compact):
+                window.set_compact(compact)
+                window.seek_editor(5)
+                window.listen()
+                window.animation_timer.stop()
+                self.audio.calls.clear()
+                roll = window.roll
+                start = QPoint(round(roll.LEFT + roll._timeline_width() / 2), 12)
+                QTest.mousePress(roll.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+                self.assertTrue(self.audio.playing)  # A press alone is not a drag.
+                for dx in (20, 40, 70):
+                    QTest.mouseMove(roll.viewport(), start - QPoint(dx, 0))
+                self.assertFalse(self.audio.playing)
+                self.assertEqual(c.state.transport, 'paused')
+                self.assertFalse(window.animation_timer.isActive())
+                self.assertEqual([call[0] for call in self.audio.calls], ['pause'])
+                self.assertAlmostEqual(roll._position, 6)
+                QTest.mouseRelease(roll.viewport(), Qt.LeftButton, Qt.NoModifier, start - QPoint(70, 0))
+                self.assertEqual([call[0] for call in self.audio.calls], ['pause', 'seek'])
+                self.assertFalse(self.audio.playing)
+                self.assertEqual(c.state.transport, 'paused')
+                self.assertAlmostEqual(c.state.logical_seek, 6)
+                self.assertAlmostEqual(self.audio.position, c.to_audio(6))
+                self.assertEqual(c.state.project['notes'], notes)
+                window.listen()
+                window.animation_timer.stop()
+                self.assertTrue(self.audio.playing)
+                self.assertAlmostEqual(self.audio.calls[-1][1], c.to_audio(6))
+
+    def test_drag_before_preview_generation_keeps_seek_for_first_listen(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        window, c = self.window, self.window.controller
+        window.set_compact(True)
+        roll = window.roll
+        window.seek_editor(.1)
+        start = QPoint(400, 90)
+        QTest.mousePress(roll.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(roll.viewport(), start - QPoint(10, 0))
+        QTest.mouseRelease(roll.viewport(), Qt.LeftButton, Qt.NoModifier, start - QPoint(10, 0))
+        expected = .1 + 10 / roll._zoom
+        self.assertAlmostEqual(c.state.logical_seek, expected)
+        self.assertFalse(self.audio.playing)
+        window.listen()
+        self.assertFalse(roll._navigation_enabled)
+        self.finish_next()
+        self.assertTrue(self.audio.playing)
+        self.assertAlmostEqual(self.audio.position, c.to_audio(expected))
+
     def test_manual_save_does_not_make_stale_export_current(self):
         self.window.begin_export()
         self.finish_next()
@@ -120,7 +180,7 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(load_project(destination)['notes'], edited)
         self.assertFalse(self.window.controller.state.project_dirty)
         self.assertTrue(self.window.controller.state.export_dirty)
-        self.assertFalse(self.window.folder_button.isEnabled())
+        self.assertFalse(self.window.controller.capabilities()['current_export'])
         self.window.listen_button.click()
         self.assertFalse(self.audio.playing)
         self.finish_next()
@@ -144,7 +204,7 @@ class WorkflowRegressionTests(unittest.TestCase):
             self.assertEqual(len(window.controller.library), 2)
             self.assertEqual(window.library_actions, [action])
             self.assertTrue(window._library_render_pending)
-            self.assertTrue(window.save_button.isEnabled())
+            self.assertTrue(window.save_shortcut.isEnabled())
             self.assertTrue(window.listen_button.isEnabled())
         finally:
             window.sample_menu.hide()
@@ -153,13 +213,14 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(len(window.library_actions), 2)
         self.assertFalse(window._library_render_pending)
 
-    def test_export_does_not_mark_unsaved_edits_as_manually_saved(self):
+    def test_preview_generation_autosaves_edits_to_open_project(self):
         edited = self.edit_pitch()
-        self.window.export_button.click()
+        self.window.listen_button.click()
         self.finish_next()
-        self.assertTrue(self.window.controller.state.project_dirty)
+        self.assertTrue(self.audio.playing)
+        self.assertFalse(self.window.controller.state.project_dirty)
         self.assertFalse(self.window.controller.state.export_dirty)
-        self.assertEqual(load_project(self.source)['notes'], self.notes)
+        self.assertEqual(load_project(self.source)['notes'], edited)
         self.assertEqual(load_project(self.home / 'autosave.hstudio')['notes'], edited)
         self.assertEqual(load_project(self.window.controller.state.result[0] / '工程.hstudio')['notes'], edited)
 
@@ -174,13 +235,15 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertTrue(self.audio.playing)
         self.assertFalse(self.executor.pending)
 
-    def test_desktop_stop_during_preview_generation_cancels_autoplay(self):
+    def test_desktop_cancel_during_preview_generation_prevents_autoplay(self):
         self.window.listen_button.click()
-        self.assertTrue(self.window.quiet_button.isEnabled())
-        self.window.quiet_button.click()
+        self.assertTrue(self.window.cancel_button.isEnabled())
+        self.assertTrue(self.window.cancel_button.isVisible())
+        self.window.cancel_button.click()
         self.finish_next()
         self.assert_not_played()
         self.window.listen_button.click()
+        self.finish_next()
         self.assertTrue(self.audio.playing)
 
     def test_remote_game_stop_during_generation_cancels_pending_performance(self):
@@ -245,9 +308,9 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(list((self.home / 'exports').iterdir()), [])
         self.assertEqual(len(self.warnings), 1)
         self.assertIn('injected disk failure', self.warnings[0])
-        self.window.export_button.click()
+        self.window.listen_button.click()
         self.finish_next()
-        self.assert_not_played()
+        self.assertTrue(self.audio.playing)
         self.assertFalse(self.window.controller.state.export_dirty)
 
     def test_failed_manual_save_preserves_previous_file_and_unsaved_state(self):
@@ -275,9 +338,9 @@ class WorkflowRegressionTests(unittest.TestCase):
         recovery = list((self.home / 'recovery').glob('*.hstudio'))
         self.assertEqual(len(recovery), 1)
         self.assertEqual(load_project(recovery[0])['notes'], edited)
-        self.assertEqual(load_project(self.source)['notes'], self.notes)
+        self.assertEqual(load_project(self.source)['notes'], edited)
         self.assertEqual(self.window.controller.state.project['notes'], [])
-        self.assertTrue(self.window.save_button.isEnabled())
+        self.assertTrue(self.window.save_shortcut.isEnabled())
         self.assertFalse(self.window.listen_button.isEnabled())
 
     def test_corrupt_project_cannot_replace_current_unsaved_work(self):
@@ -308,7 +371,7 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.edit_pitch()
         self.expected_warning_count = 1
         self.assertFalse(self.window.close())
-        self.assertFalse(self.window.save_button.isEnabled())
+        self.assertFalse(self.window.save_shortcut.isEnabled())
         self.assertFalse(self.window.open_button.isEnabled())
         self.app.processEvents()
         self.assertTrue(self.window.isVisible())
@@ -317,9 +380,98 @@ class WorkflowRegressionTests(unittest.TestCase):
             finish_saves(self.window.controller, self.save_executor)
         self.assertFalse(self.window.controller.state.closed)
         self.assertTrue(self.window.controller.state.project_dirty)
-        self.assertTrue(self.window.save_button.isEnabled())
+        self.assertTrue(self.window.save_shortcut.isEnabled())
         self.assertTrue(self.window.open_button.isEnabled())
         self.assertTrue(self.window.isVisible())
+
+    def test_project_shortcut_and_file_drop_work_without_project_buttons(self):
+        from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
+        from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeySequence
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QPushButton
+        window = self.window
+        for compact in (False, True):
+            window.set_compact(compact)
+            window.activateWindow()
+            window.setFocus()
+            self.app.processEvents()
+            self.assertFalse(any(b.text() in ('打开工程', '保存工程') for b in window.findChildren(QPushButton)))
+            destination = self.root / f'backup-{compact}.hstudio'
+            with patch('harmonica_studio.gui.QFileDialog.getSaveFileName', return_value=(str(destination), '')) as dialog:
+                QTest.keySequence(window, QKeySequence.Save)
+                self.app.processEvents()
+                dialog.assert_called_once()
+            finish_saves(window.controller, self.save_executor)
+            self.assertEqual(load_project(destination)['notes'], self.notes)
+            imported = self.root / f'imported-{compact}.hstudio'
+            save_project(imported, make_project(self.notes, '拖入的工程'))
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(str(imported))])
+            enter = QDragEnterEvent(QPoint(50, 50), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+            self.app.sendEvent(window, enter)
+            self.assertTrue(enter.isAccepted())
+            drop = QDropEvent(QPointF(50, 50), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+            self.app.sendEvent(window, drop)
+            self.app.processEvents()
+            self.assertEqual(window.controller.state.project_path, imported)
+            self.assertEqual(window.controller.state.project['title'], '拖入的工程')
+
+    def test_highlight_controls_save_restore_and_clear_in_both_layouts(self):
+        window=self.window
+        window.seek_editor(.2)
+        window.highlight_button.click()
+        self.assertEqual(window.controller.state.project['highlight'],.2)
+        self.assertEqual(window.roll._highlight,.2)
+        self.assertEqual(window.playback_progress.marker_seconds,.2)
+        self.assertIn('00:00.200',window.playback_progress.toolTip())
+        for compact in (True,False):
+            window.set_compact(compact)
+            self.app.processEvents()
+            self.assertTrue(window.highlight_button.isVisible())
+            self.assertTrue(window.highlight_seek_button.isEnabled())
+            roll_bottom=window.roll.mapTo(window,window.roll.rect().bottomLeft()).y()
+            marker_top=window.highlight_button.mapTo(window,window.highlight_button.rect().topLeft()).y()
+            self.assertGreater(marker_top,roll_bottom)
+            window.seek_editor(0)
+            window.highlight_seek_button.click()
+            self.assertAlmostEqual(window.controller.state.logical_seek,.2)
+        destination=self.root/'marked.hstudio'
+        window.save_to(destination)
+        finish_saves(window.controller,self.save_executor)
+        window.open_project(destination)
+        self.assertEqual(window.roll._highlight,.2)
+        window.highlight_clear_button.click()
+        self.assertIsNone(window.roll._highlight)
+        self.assertIsNone(window.playback_progress.marker_seconds)
+        self.assertFalse(window.highlight_seek_button.isEnabled())
+
+    def test_progress_marker_follows_audio_time_after_export_and_score_time_after_edit(self):
+        window=self.window
+        c=window.controller
+        c.set_highlight(.2)
+        self.assertEqual(window.playback_progress.marker_seconds,.2)
+        window.begin_export()
+        self.finish_next()
+        self.assertAlmostEqual(window.playback_progress.marker_seconds,c.to_audio(.2))
+        self.assertNotAlmostEqual(window.playback_progress.marker_seconds,.2)
+        self.assertEqual(window.roll._highlight,.2)
+        self.edit_pitch()
+        self.assertEqual(window.playback_progress.marker_seconds,.2)
+        c.set_highlight(None)
+        self.assertIsNone(window.playback_progress.marker_seconds)
+
+    def test_compact_game_button_prepares_changed_highlight_before_arming(self):
+        from dataclasses import replace
+        c=self.window.controller
+        c.set_highlight(.2)
+        c.update_preferences(replace(c.preferences,start_from_highlight=True))
+        self.window.set_compact(True)
+        self.assertTrue(self.window.arm_button.isEnabled())
+        self.window.arm_button.click()
+        self.finish_next()
+        self.assertEqual(self.player.calls[-1][0],'arm')
+        self.assertAlmostEqual(self.player.calls[-1][2],c.to_audio(.2))
+        self.assert_not_played()
 
 
 if __name__ == '__main__':

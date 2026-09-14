@@ -59,6 +59,43 @@ class ScriptPlayerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'已有演奏器'):
             self.player.start(self.script)
 
+    def test_highlight_offset_reaches_armed_process_and_can_reset_to_beginning(self):
+        self.script.write_text('; Harmonica Studio remote protocol: 1\n; Harmonica Studio start offset: 1',encoding='utf-8')
+        self.player.start(self.script,start_seconds=2.345)
+        self.assertEqual(self.launches[0][-1],'2345')
+        self.assertFalse(self.player.command_file.exists())
+        self.player.play(self.script,start_seconds=2.345)
+        self.assertEqual(self.command(),dict(id=1,action='play',start_ms=2345))
+        self.player.stop_playback()
+        self.assertEqual(self.command(),dict(id=2,action='stop'))
+        self.player.play(self.script)
+        self.assertEqual(self.command(),dict(id=3,action='play',start_ms=0))
+
+    def test_deferred_restart_preserves_offset_and_stop_still_cancels_it(self):
+        self.script.write_text('; Harmonica Studio remote protocol: 1\n; Harmonica Studio start offset: 1',encoding='utf-8')
+        self.player.play(self.script)
+        self.player.stop()
+        self.player.play(self.script,start_seconds=3)
+        self.processes[0].returncode=0
+        self.player.reap()
+        self.assertEqual(self.launches[-1][-1],'3000')
+        self.assertEqual(self.command()['start_ms'],3000)
+        self.player.stop()
+        self.player.play(self.script,start_seconds=4)
+        self.player.stop_playback()
+        self.processes[-1].returncode=0
+        self.player.reap()
+        self.assertEqual(len(self.launches),2)
+
+    def test_invalid_or_unsupported_offset_fails_before_launch_or_command(self):
+        for value in (-1,True,'3',float('nan'),float('inf'),1201,10**500):
+            with self.subTest(value=str(value)),self.assertRaises(ValueError):
+                self.player.start(self.script,start_seconds=value)
+        for operation in (self.player.start,self.player.play):
+            with self.assertRaisesRegex(RuntimeError,'重新导出'):
+                operation(self.script,start_seconds=3)
+        self.assertEqual(self.launches,[])
+
     def test_newest_stop_supersedes_play_before_process_reads_it(self):
         self.player.play(self.script)
         self.assertEqual(self.command(),dict(id=1,action='play'))

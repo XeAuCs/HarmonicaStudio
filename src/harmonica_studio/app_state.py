@@ -22,6 +22,7 @@ class FollowUp(str, Enum):
 class AppState:
     project: dict | None = None
     project_path: Path | None = None
+    auto_project_path: Path | None = None
     source: Path | None = None
     parts: dict = field(default_factory=dict)
     names: dict = field(default_factory=dict)

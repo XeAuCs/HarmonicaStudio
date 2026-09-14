@@ -37,13 +37,13 @@ class SilentScriptPlayer:
         self.calls = []
         self.status = dict(state='idle', position=0, duration=0, message='')
 
-    def play(self, script):
-        self.calls.append(('play', Path(script)))
+    def play(self, script, *, start_seconds=0):
+        self.calls.append(('play', Path(script), start_seconds) if start_seconds else ('play', Path(script)))
         self.alive = True
         self.status['state'] = 'countdown'
 
-    def start(self, script):
-        self.calls.append(('arm', Path(script)))
+    def start(self, script, *, start_seconds=0):
+        self.calls.append(('arm', Path(script), start_seconds) if start_seconds else ('arm', Path(script)))
         self.alive = True
         self.status['state'] = 'ready'
 

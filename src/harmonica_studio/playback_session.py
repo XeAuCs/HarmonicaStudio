@@ -18,6 +18,7 @@ class PlaybackSession:
         self.audio = audio if audio is not None else AudioPlayer()
         self.player = player if player is not None else ScriptPlayer(control_directory)
         self.clock = clock if clock is not None else PlaybackClock()
+        self.manual_seek = False
         self.set_time_anchors([])
 
     def set_time_anchors(self, anchors):
@@ -36,6 +37,7 @@ class PlaybackSession:
         self.emit('position')
 
     def stop_preview(self):
+        self.manual_seek = False
         self.audio.stop()
         self.state.transport = Transport.READY
         self.state.logical_seek = 0
@@ -51,6 +53,7 @@ class PlaybackSession:
         self.stop_game(close=True)
 
     def invalidate_after_edit(self):
+        self.manual_seek = False
         s = self.state
         s.preview_duration, s.logical_seek = 0, 0
         s.transport = Transport.READY
@@ -84,24 +87,27 @@ class PlaybackSession:
             position = self.audio.position
             self.clock.reset(position, resume)
             s.logical_seek = self.to_score(position)
-            if not resume:
+            if not resume and s.transport != Transport.PAUSED:
                 s.transport = Transport.READY
-            self.position(position, '试听中' if resume else '已定位')
+            self.position(position, '试听中' if resume else '已暂停' if s.transport == Transport.PAUSED else '已定位')
         else:
             s.logical_seek = max(0, min(s.score_duration, seconds))
             self.position(s.logical_seek, '已定位')
 
-    def listen(self, folder):
+    def listen(self, folder, *, start_score=None):
         s = self.state
         self.stop_game(close=True)
         if not s.preview_duration:
             self.load_preview(folder)
+        if start_score is not None:
+            self.seek_score(start_score)
         start = self.audio.position
-        if s.transport == Transport.ENDED or start >= s.preview_duration - .01:
+        if start_score is None and (s.transport == Transport.ENDED or start >= s.preview_duration - .01):
             start, s.logical_seek = 0, 0
         self.audio.play(start)
         s.transport = Transport.PLAYING
         self.clock.reset(start, True)
+        self.manual_seek = False
         self.position(start, '试听中')
         self.emit('changed')
 
@@ -125,12 +131,18 @@ class PlaybackSession:
         self.clock.synchronize(position, playing)
         if not playing:
             s.transport = Transport.ENDED
+            self.manual_seek = False
         self.position(self.clock.position(duration=s.preview_duration) if playing else s.preview_duration,
                       '试听中' if playing else '已结束')
 
-    def start_game(self, folder, *, arm=False):
+    def start_game(self, folder, *, arm=False, start_score=None):
         script = folder / '演奏脚本.ahk'
-        self.player.start(script) if arm else self.player.play(script)
+        options = {}
+        if start_score is not None:
+            # Millisecond rounding must not move a valid near-end marker past the last release.
+            end = self.to_audio(self.state.score_duration)
+            options['start_seconds'] = max(0, min(self.to_audio(start_score), end - .001))
+        self.player.start(script, **options) if arm else self.player.play(script, **options)
 
     def stop_game(self, *, close=False):
         self.player.stop() if close else self.player.stop_playback()

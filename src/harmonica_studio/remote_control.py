@@ -90,7 +90,9 @@ class RemoteControl:
                     can_play=c.capabilities()['can_play'], game=game, score_id=score['id'],
                     library_refreshing=c.library_refreshing, library_revision=s.library_revision,
                     library_error='曲库刷新失败，请检查电脑端状态。' if s.library_error else '',
-                    saving=c.saving, transition=s.transition)
+                    saving=c.saving, transition=s.transition,
+                    highlight=s.project.get('highlight') if s.project else None,
+                    start_from_highlight=c.preferences.start_from_highlight)
 
     def score_snapshot(self):
         c, s = self.controller, self.controller.state

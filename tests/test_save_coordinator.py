@@ -94,8 +94,10 @@ class SaveCoordinatorTests(unittest.TestCase):
 
         with patch('harmonica_studio.save_coordinator.save_project', side_effect=write):
             finish_saves(c, self.executor)
-        self.assertEqual(written, [('autosave.hstudio', 60), ('autosave.hstudio', 62),
-                                   ('manual.hstudio', 62), ('autosave.hstudio', 63)])
+        self.assertEqual(written, [('autosave.hstudio', 60), ('input.hstudio', 60),
+                                   ('autosave.hstudio', 62), ('input.hstudio', 62),
+                                   ('manual.hstudio', 62), ('autosave.hstudio', 62),
+                                   ('autosave.hstudio', 63), ('input.hstudio', 63)])
 
     def test_repeated_manual_saves_to_same_path_are_serial(self):
         c = self.c
@@ -199,7 +201,9 @@ class SaveCoordinatorTests(unittest.TestCase):
         finish_saves(c, self.executor)
         self.assertFalse(c.state.closed)
         self.assertIsNone(c.state.transition)
-        self.assertTrue(c.state.project_dirty)
+        self.assertFalse((self.root / 'manual.hstudio').exists())
+        self.assertEqual(load_project(self.path)['notes'][0]['pitch'], 62)
+        self.assertFalse(c.state.project_dirty)  # Original project autosaved; failed copy still aborts close.
         self.assertTrue(c.capabilities()['can_edit'])
 
     def test_save_runs_without_waiting_for_conversion(self):

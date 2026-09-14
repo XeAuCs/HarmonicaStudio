@@ -35,6 +35,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.skip_long_rests)
         rest_hint = QLabel('音符之间超过 3 秒的空白缩短为 0.6 秒。保留正常停顿和长音，试听与游戏演奏同步生效。')
         rest_hint.setObjectName('muted');rest_hint.setWordWrap(True);layout.addWidget(rest_hint)
+        self.start_from_highlight = QCheckBox('从心动片段开始播放')
+        self.start_from_highlight.setChecked(preferences.start_from_highlight)
+        layout.addWidget(self.start_from_highlight)
+        highlight_hint = QLabel('试听和游戏演奏均生效。没有标记时正常播放；暂停后继续或手动定位试听时保留当前位置。')
+        highlight_hint.setObjectName('muted');highlight_hint.setWordWrap(True);layout.addWidget(highlight_hint)
         layout.addWidget(QLabel('曲库文件夹'))
         row = QHBoxLayout()
         self.folder = QLineEdit(str(library_root));self.folder.setReadOnly(True)
@@ -64,4 +69,5 @@ class SettingsDialog(QDialog):
     def preferences(self):
         return Preferences(theme=self.theme.currentData(), compact=self.compact.isChecked(),
                            library_folder='' if self._default_folder else str(Path(self.folder.text())),
-                           skip_long_rests=self.skip_long_rests.isChecked())
+                           skip_long_rests=self.skip_long_rests.isChecked(),
+                           start_from_highlight=self.start_from_highlight.isChecked())

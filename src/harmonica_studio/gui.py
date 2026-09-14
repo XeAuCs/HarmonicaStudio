@@ -2,7 +2,7 @@
 from pathlib import Path
 import logging
 from PySide6.QtCore import Qt,QTimer,QUrl,Signal,QFileSystemWatcher,QPointF,QLineF
-from PySide6.QtGui import QDesktopServices,QKeySequence,QShortcut,QIcon,QPainter,QColor,QPen
+from PySide6.QtGui import QDesktopServices,QKeySequence,QShortcut,QIcon,QPainter,QColor,QPen,QPainterPath
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,
     QLabel,QPushButton,QFrame,QTableWidget,QTableWidgetItem,QHeaderView,QFileDialog,
     QDoubleSpinBox,QSpinBox,QCheckBox,QComboBox,QFormLayout,QMessageBox,QProgressBar,
@@ -11,6 +11,7 @@ from . import __version__
 from .models import Options
 from .paths import resource_root,data_root,icon_path,default_library_root
 from .editor import NoteEditor
+from .icon_button import IconButton
 from .storage import load_options
 from .theme import STYLE,make_style,theme_palette
 from .settings_ui import SettingsDialog
@@ -39,24 +40,40 @@ def button(text,slot,primary=False):
 class SeekSlider(QSlider):
     seekCommitted=Signal(int)
     def __init__(self):
-        super().__init__(Qt.Horizontal);self.setRange(0,0);self.setMinimumHeight(24)
+        super().__init__(Qt.Horizontal);self.setRange(0,0);self.setMinimumHeight(36)
         self._visual_value=0.0;self._colors=theme_palette()
+        self.marker_seconds=None
         self.valueChanged.connect(self._changed)
     def _changed(self,value):self._visual_value=float(value);self.update()
     def set_theme(self,palette):self._colors=palette;self.update()
+    def set_marker(self,seconds):
+        if self.marker_seconds==seconds:return
+        self.marker_seconds=seconds
+        self.setToolTip('' if seconds is None else f'音符标记 · 心动片段 {int(seconds)//60:02d}:{seconds%60:06.3f}')
+        self.update()
     def set_playback_position(self,seconds):
         if self.isSliderDown():return
         value=max(self.minimum(),min(self.maximum(),seconds*1000))
         self.setValue(round(value));self._visual_value=value;self.update()
     def paintEvent(self,event):
         painter=QPainter(self);painter.setRenderHint(QPainter.Antialiasing)
-        left,right=7.0,max(7.0,self.width()-7.0);y=self.height()/2
+        left,right=7.0,max(7.0,self.width()-7.0);y=self.height()/2+5
         fraction=(self._visual_value-self.minimum())/max(1,self.maximum()-self.minimum())
         x=left+fraction*(right-left)
         painter.setPen(QPen(QColor(self._colors['line']),1.5));painter.drawLine(QLineF(left,y,right,y))
         accent=QColor(self._colors['accent'] if self.isEnabled() else self._colors['muted'])
         painter.setPen(QPen(accent,2));painter.drawLine(QLineF(left,y,x,y))
         painter.setBrush(QColor(self._colors['surface']));painter.setPen(QPen(accent,1.7));painter.drawEllipse(QPointF(x,y),5,5)
+        if self.marker_seconds is not None and self.maximum()>self.minimum():
+            fraction=max(0,min(1,(self.marker_seconds*1000-self.minimum())/(self.maximum()-self.minimum())))
+            marker_x=left+fraction*(right-left)
+            # Geometry avoids missing music-note glyphs in Windows fonts.
+            painter.setPen(Qt.NoPen);painter.setBrush(accent)
+            painter.drawEllipse(QPointF(marker_x-2,y-9),3.5,2.5)
+            painter.setPen(QPen(accent,1.5));painter.drawLine(QLineF(marker_x+1,y-9,marker_x+1,y-22))
+            flag=QPainterPath(QPointF(marker_x+1,y-22))
+            flag.cubicTo(marker_x+1,y-18,marker_x+8,y-18,marker_x+3,y-13)
+            painter.setBrush(Qt.NoBrush);painter.drawPath(flag)
         if self.hasFocus():
             painter.setPen(QPen(accent,1,Qt.DotLine));painter.setBrush(Qt.NoBrush);painter.drawRect(self.rect().adjusted(1,1,-2,-2))
     def _position(self,event):
@@ -93,16 +110,16 @@ class MainWindow(QMainWindow):
         header=QHBoxLayout();header.setSpacing(16);logo=QLabel();logo.setPixmap(self.windowIcon().pixmap(44,44));logo.setFixedSize(46,46);header.addWidget(logo)
         titlebox=QVBoxLayout();titlebox.setSpacing(3);titlebox.addWidget(label('口琴工坊','brand'))
         titlebox.addWidget(label('HARMONICA  /  曲谱与演奏','eyebrow'));header.addLayout(titlebox,1)
-        self.remote_button=button('手机遥控',self.open_remote);header.addWidget(self.remote_button)
-        self.settings_button=button('设置',self.open_settings);header.addWidget(self.settings_button)
+        self.remote_button=IconButton('手机遥控','phone',self.open_remote);header.addWidget(self.remote_button)
+        self.settings_button=IconButton('设置','settings',self.open_settings);header.addWidget(self.settings_button)
         header.addWidget(label('v'+__version__,'muted'));layout.addLayout(header)
         filecard,filebox=card();filerow=QHBoxLayout()
         self.filename=label('选择一首曲谱','section');filerow.addWidget(self.filename,1)
         self.example_button=QPushButton('曲库');self.sample_menu=QMenu(self.example_button);self.sample_menu.setToolTipsVisible(True)
         self.sample_menu.aboutToShow.connect(self.refresh_library)
         self.example_button.setMenu(self.sample_menu);self.open_button=button('打开 MIDI',self.choose_file,True)
-        self.project_button=button('打开工程',self.choose_project);self.restore_button=button('恢复上次编辑',self.restore_last)
-        for b in (self.example_button,self.open_button,self.project_button,self.restore_button):filerow.addWidget(b)
+        self.open_button.setToolTip('选歌时自动恢复工程；也可将 .hstudio 工程文件拖入窗口打开。')
+        for b in (self.example_button,self.open_button):filerow.addWidget(b)
         filebox.addLayout(filerow);layout.addWidget(filecard)
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)
         import_page=QWidget();importbox=QHBoxLayout(import_page);importbox.setContentsMargins(0,12,0,0);importbox.setSpacing(14)
@@ -131,30 +148,38 @@ class MainWindow(QMainWindow):
         importbox.addWidget(right,2);self.tabs.addTab(import_page,'曲谱')
         editor_page=QWidget();editorbox=QVBoxLayout(editor_page);editorbox.setContentsMargins(0,12,0,0)
         editcard,editbox=card();editorbox.addWidget(editcard,1)
-        top=QHBoxLayout();self.summary=label('旋律','result');top.addWidget(self.summary,1)
-        self.save_button=button('保存工程',self.save_current);top.addWidget(self.save_button);editbox.addLayout(top)
+        summary_row=QHBoxLayout();summary_row.setSpacing(20)
+        self.summary=label('旋律','result');summary_row.addWidget(self.summary,1)
+        self.summary.setToolTip('工程和标记自动保存。需要备份或分享时，按 Ctrl+S 另存工程副本。')
         self.edit_toolbar=QWidget();toolsrow=QHBoxLayout(self.edit_toolbar);toolsrow.setContentsMargins(0,0,0,0)
-        self.undo_button=button('撤销',lambda:self.roll.undo());self.redo_button=button('重做',lambda:self.roll.redo())
-        self.delete_button=button('删除音符',lambda:self.roll.delete_selected())
-        for b in (self.undo_button,self.redo_button,self.delete_button):toolsrow.addWidget(b)
-        toolsrow.addStretch()
         for text,callback in [('音域 −',lambda:self.roll.pitch_zoom_out()),('音域 +',lambda:self.roll.pitch_zoom_in()),('适配音域',lambda:self.roll.fit_pitches()),('时间 −',lambda:self.roll.zoom_out()),('时间 +',lambda:self.roll.zoom_in())]:
             toolsrow.addWidget(button(text,callback))
-        editbox.addWidget(self.edit_toolbar)
+        summary_row.addWidget(self.edit_toolbar,0,Qt.AlignVCenter);editbox.addLayout(summary_row)
         self.roll=NoteEditor();self.roll.setMinimumHeight(250)
         self.roll.notesChanged.connect(self.notes_changed);self.roll.seekRequested.connect(self.seek_editor)
+        self.roll.scrubStarted.connect(self.pause_listening)
+        self.roll.scrubMoved.connect(self.preview_scrub)
         self.roll.message.connect(lambda text:self.status.setText(text));self.roll.historyChanged.connect(lambda *_:self.refresh_controls())
         editbox.addWidget(self.roll,1)
-        self.edit_hint=label('拖动修改音符 · 拉右边缘改时长 · 双击空白添加 · 点击时间尺定位试听','muted');editbox.addWidget(self.edit_hint)
+        self.edit_hint=label('拖动音符编辑 · 双击空白添加\n拖动空白 / 时间尺移动并暂停','muted')
+        self.edit_hint.setToolTip('拖动音符右边缘修改时长。点击谱面后：Ctrl+Z 撤销，Ctrl+Y / Ctrl+Shift+Z 重做；选中音符后按 Delete 删除。')
+        marker_row=QHBoxLayout()
+        marker_row.setSpacing(12);marker_row.addWidget(self.edit_hint,1)
+        marker_row.addStretch()
+        self.highlight_button=button('标记心动片段',self.mark_highlight)
+        self.highlight_button.setToolTip('先暂停或拖动定位，再标记心动片段。标记会自动保存到工程，下次选同一首歌自动恢复。')
+        self.highlight_seek_button=button('跳到标记',self.seek_highlight)
+        self.highlight_clear_button=button('清除标记',lambda:self.presenter.invoke(self.controller.set_highlight,None))
+        for b in (self.highlight_button,self.highlight_seek_button,self.highlight_clear_button):marker_row.addWidget(b)
+        editbox.addLayout(marker_row)
         timeline=QHBoxLayout();self.playback_state=label('未播放','muted');self.playback_state.setMinimumWidth(55)
         self.playback_progress=SeekSlider();self.playback_progress.setAccessibleName('试听播放进度，可拖动跳转')
         self.playback_progress.seekCommitted.connect(lambda ms:self.seek_audio(ms/1000))
         self.playback_time=label('00:00 / 00:00','muted');self.playback_time.setMinimumWidth(120);self.playback_time.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
         timeline.addWidget(self.playback_state);timeline.addWidget(self.playback_progress,1);timeline.addWidget(self.playback_time);editbox.addLayout(timeline)
         row=QHBoxLayout();self.listen_button=button('试听',self.listen,True);self.pause_button=button('暂停',self.pause_listening)
-        self.quiet_button=button('停止',self.stop_listening);self.export_button=button('导出修改',self.begin_export)
-        self.folder_button=button('导出文件',self.open_export);self.arm_button=button('演奏',self.arm);self.stop_button=button('结束演奏',self.stop_script)
-        for b in (self.listen_button,self.pause_button,self.quiet_button,self.export_button,self.folder_button,self.arm_button,self.stop_button):row.addWidget(b)
+        self.arm_button=button('演奏',self.arm);self.stop_button=button('结束演奏',self.stop_script)
+        for b in (self.listen_button,self.pause_button,self.arm_button,self.stop_button):row.addWidget(b)
         editbox.addLayout(row)
         self.tabs.addTab(editor_page,'编辑与试听')
         bottom=QHBoxLayout();self.status=label('从曲库选歌，或拖入 MIDI。','muted');bottom.addWidget(self.status,1)
@@ -162,7 +187,7 @@ class MainWindow(QMainWindow):
         self.progress=QProgressBar();self.progress.setRange(0,1);self.progress.setValue(0);self.progress.setTextVisible(False);layout.addWidget(self.progress)
         self.footer=label('试听为合成音色  /  F6 开始、停止演奏 · F8 退出  /  游戏兼容性尚未实测','muted');layout.addWidget(self.footer)
         self.autosave_timer=QTimer(self);self.autosave_timer.setSingleShot(True);self.autosave_timer.timeout.connect(self.autosave)
-        QShortcut(QKeySequence.Save,self,activated=self.save_current)
+        self.save_shortcut=QShortcut(QKeySequence.Save,self,activated=self.save_current)
         self.timer=QTimer(self);self.timer.timeout.connect(self.poll);self.timer.start(100)
         self.animation_timer=QTimer(self);self.animation_timer.setTimerType(Qt.PreciseTimer);self.animation_timer.timeout.connect(self.animate_playback)
         self.library_timer=QTimer(self);self.library_timer.setSingleShot(True);self.library_timer.timeout.connect(self.refresh_library)
@@ -231,6 +256,7 @@ class MainWindow(QMainWindow):
     def apply_theme(self,name):
         self.setStyleSheet(make_style(name));palette=theme_palette(name)
         self.roll.set_theme(palette);self.playback_progress.set_theme(palette)
+        self.remote_button.set_theme(palette);self.settings_button.set_theme(palette)
         if getattr(self,'remote_dialog',None):self.remote_dialog.set_theme(palette)
 
     def open_settings(self):
@@ -258,14 +284,14 @@ class MainWindow(QMainWindow):
         self.compact=compact
         self.tabs.setTabVisible(0,not compact);self.tabs.tabBar().setVisible(not compact)
         if compact:self.tabs.setCurrentIndex(1)
-        for widget in (self.edit_toolbar,self.edit_hint,self.save_button,self.export_button,self.restore_button,self.project_button,self.folder_button):widget.setVisible(not compact)
+        for widget in (self.edit_toolbar,self.edit_hint):widget.setVisible(not compact)
         self.roll.setMinimumHeight(170 if compact else 250);self.roll.set_compact(compact)
-        self.tabs.setMinimumHeight(300 if compact else 495)
-        self.setMinimumSize(800,590) if compact else self.setMinimumSize(1080,820)
+        self.tabs.setMinimumHeight(350 if compact else 545)
+        self.setMinimumSize(800,640) if compact else self.setMinimumSize(1080,870)
         if changed:
             size=self._compact_size if compact else self._full_size
             if size:self.resize(size)
-            elif compact:self.resize(900,600)
+            elif compact:self.resize(900,650)
         self.refresh_controls()
         if compact and not initial and self.controller.state.parts and self.controller.state.project is None and not self.controller.jobs.current:self.begin_convert()
         if not self.controller.state.project:self.summary.setText('从曲库选歌，自动生成旋律。' if compact else '生成曲谱后，在这里编辑旋律。')
@@ -278,30 +304,30 @@ class MainWindow(QMainWindow):
             self.animation_timer.start(16)
         elif not playing and self.animation_timer.isActive():
             self.animation_timer.stop()
-        for widget in (self.open_button, self.example_button, self.project_button, self.table,
+        for widget in (self.open_button, self.example_button, self.table,
                        self.speed, self.transpose, self.mode, self.octave, self.phrase_octave, self.trim):
             widget.setEnabled(caps['can_open'])
         self.settings_button.setEnabled(s.transition is None)
-        self.restore_button.setEnabled(caps['can_open'] and (c.home / 'autosave.hstudio').is_file())
         self.convert_button.setEnabled(caps['can_convert'])
         self.cancel_button.setEnabled(busy and c.jobs.current.kind in ('convert', 'export'))
         self.cancel_button.setVisible(busy)
         self.progress.setVisible(busy)
-        self.save_button.setEnabled(caps['can_save'])
-        self.export_button.setEnabled(caps['can_export'])
+        self.save_shortcut.setEnabled(caps['can_save'])
         retry = self.compact and bool(s.parts) and s.project is None
         self.listen_button.setEnabled((caps['can_play'] or (retry and caps['can_open'])) and not playing)
         self.listen_button.setText('重新生成' if retry else '继续试听' if s.transport == 'paused' else '试听')
         self.pause_button.setEnabled(playing)
-        self.quiet_button.setEnabled(has or busy)
         self.playback_progress.setEnabled(caps['can_play'])
-        self.folder_button.setEnabled(caps['current_export'])
-        self.arm_button.setEnabled(caps['current_export'] and not c.player.alive)
+        self.arm_button.setEnabled(caps['can_play'] and not c.player.alive)
         self.stop_button.setEnabled(c.player.alive or (busy and c.jobs.current.follow_up in (FollowUp.GAME, FollowUp.ARM)))
         self.roll.set_read_only(not caps['can_edit'] or self.compact)
-        self.undo_button.setEnabled(caps['can_edit'] and self.roll.can_undo)
-        self.redo_button.setEnabled(caps['can_edit'] and self.roll.can_redo)
-        self.delete_button.setEnabled(caps['can_edit'] and not self.compact)
+        self.roll.set_navigation_enabled(caps['can_play'])
+        highlight=s.project.get('highlight') if has else None
+        self.roll.set_highlight(highlight)
+        self.playback_progress.set_marker(c.to_audio(highlight) if highlight is not None and s.preview_duration else highlight)
+        self.highlight_button.setEnabled(caps['can_edit'] and s.has_notes and s.logical_seek<s.score_duration)
+        self.highlight_clear_button.setEnabled(caps['can_edit'] and highlight is not None)
+        self.highlight_seek_button.setEnabled(caps['can_play'] and highlight is not None)
         self.progress.setRange(0, 0 if busy else 1)
         if not busy:
             self.progress.setValue(1 if s.result else 0)
@@ -312,11 +338,7 @@ class MainWindow(QMainWindow):
     def choose_file(self):
         path,_=QFileDialog.getOpenFileName(self,'打开 MIDI 曲谱','', 'MIDI 曲谱 (*.mid *.midi *.kar *.rmi)')
         if path:self.load_file(path)
-    def choose_project(self):
-        path,_=QFileDialog.getOpenFileName(self,'打开口琴工程','', '口琴工程 (*.hstudio)')
-        if path:self.open_project(path)
     def load_example(self):self.load_file(default_library_root()/'欢乐颂.mid')
-    def restore_last(self):self.open_project(self.controller.home/'autosave.hstudio')
 
 
     def load_file(self, path, sample_options=None, *, prepare=False, autoplay=False):
@@ -374,7 +396,7 @@ class MainWindow(QMainWindow):
             self.controller.autosave()
         except Exception:
             logging.exception('Autosave failed')
-            self.status.setText('自动暂存失败，请点击保存工程选择其他位置。')
+            self.status.setText('自动保存工程失败，请按 Ctrl+S 另存到其他位置。')
 
     def notes_changed(self, notes):
         self.presenter.invoke(self.controller.replace_notes, notes)
@@ -421,6 +443,20 @@ class MainWindow(QMainWindow):
 
     def seek_editor(self, seconds):
         self.presenter.invoke(self.controller.seek_score, seconds)
+        self.refresh_controls()
+
+    def preview_scrub(self, seconds):
+        c = self.controller
+        position = c.to_audio(seconds) if c.state.preview_duration else seconds
+        self.display_position(position, '已暂停 · 拖动定位')
+
+    def mark_highlight(self):
+        self.presenter.invoke(self.controller.set_highlight,self.controller.state.logical_seek)
+
+    def seek_highlight(self):
+        project=self.controller.state.project
+        if project is not None and project.get('highlight') is not None:
+            self.seek_editor(project['highlight'])
     def seek_audio(self, seconds):
         self.presenter.invoke(self.controller.seek_audio, seconds)
 
@@ -439,11 +475,9 @@ class MainWindow(QMainWindow):
         self.presenter.invoke(self.controller.update_playback)
 
     def animate_playback(self):
-        if self.controller.state.transport=='playing' and not self.playback_progress.isSliderDown():
+        if self.controller.state.transport=='playing' and not self.playback_progress.isSliderDown() and not self.roll.is_scrubbing:
             self.display_position(self.controller.clock.position(duration=self.controller.state.preview_duration),'试听中')
 
-    def open_export(self):
-        if self.controller.state.result and not self.controller.state.export_dirty:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.controller.state.result[0])))
     def arm(self):
         self.presenter.invoke(self.controller.game_play, arm=True)
     def stop_script(self):
@@ -483,13 +517,13 @@ class MainWindow(QMainWindow):
     def start_remote(self, **options):
         server = self.remote_control.start(**options)
         self.remote_timer.start(50)
-        self.remote_button.setText('手机遥控 · 已开启')
+        self.remote_button.set_active(True)
         return server
 
     def stop_remote(self):
         self.remote_timer.stop()
         self.remote_control.stop()
-        self.remote_button.setText('手机遥控')
+        self.remote_button.set_active(False)
         if self.remote_dialog:
             self.remote_dialog.timer.stop();self.remote_dialog.hide();self.remote_dialog.deleteLater()
             self.remote_dialog = None

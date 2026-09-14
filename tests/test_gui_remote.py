@@ -45,6 +45,26 @@ class RemoteGuiWorkflowTests(unittest.TestCase):
     def tearDown(self):
         self.wait_for(lambda:self.window.controller.jobs.current is None and not self.window.controller.library_refreshing)
         self.window.controller.close();self.window.close();self.app.processEvents();self.pool.shutdown();self.temp.cleanup()
+
+    def test_phone_preview_and_game_follow_desktop_highlight_setting(self):
+        from dataclasses import replace
+        from harmonica_studio.diagnostic_backends import SilentScriptPlayer
+        from harmonica_studio.project import make_project,save_project
+        c=self.window.controller
+        c.player=SilentScriptPlayer()
+        path=self.root/'marker.hstudio'
+        project=make_project([dict(pitch=60,start=0,end=1,velocity=80),dict(pitch=73,start=10,end=11,velocity=80)])
+        project['highlight']=10
+        save_project(path,project)
+        self.window.open_project(path)
+        c.update_preferences(replace(c.preferences,start_from_highlight=True))
+        self.assertTrue(self.request({'action':'play'})['ok'])
+        self.wait_for(lambda:not c.busy)
+        self.assertAlmostEqual(c.audio.position,c.to_audio(10))
+        self.assertEqual(self.request()['highlight'],10)
+        self.assertTrue(self.request({'action':'game_play'})['ok'])
+        self.assertAlmostEqual(c.player.calls[-1][2],c.to_audio(10))
+        self.assertFalse(c.audio.playing)
     def wait_for(self, condition):
         deadline=time.monotonic()+20
         while not condition():

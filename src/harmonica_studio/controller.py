@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 import logging
 from pathlib import Path
 import time
@@ -19,6 +20,7 @@ from .project import load_project, validate_project
 from .save_coordinator import SaveCoordinator, SaveKind, SaveSnapshot
 from .service import convert_prepared, export_project_prepared, load_export_result, load_ranked_midi
 from .storage import save_options
+from .song_projects import song_project_path
 
 
 @dataclass
@@ -200,7 +202,7 @@ class AppController:
         if s.project_dirty:
             name = datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6] + '.hstudio'
             return self.saves.submit(self._save_snapshot(),
-                                     (self.home / 'recovery' / name, self.home / 'autosave.hstudio'),
+                                     (self.home / 'recovery' / name, *self._autosave_paths()),
                                      SaveKind.PRESERVE, remote=remote)
         if self.saving:
             return self.saves.submit(SaveSnapshot(s.document_id, s.revision, None), (),
@@ -213,6 +215,12 @@ class AppController:
     def _save_snapshot(self):
         s = self.state
         return SaveSnapshot(s.document_id, s.revision, deepcopy(s.project))
+
+    def _autosave_paths(self):
+        paths = [self.home / 'autosave.hstudio']
+        if self.state.auto_project_path is not None:
+            paths.append(self.state.auto_project_path)
+        return tuple(dict.fromkeys(paths))
 
     def _defer_until_saved(self, request, action, transition, follow_up=FollowUp.NONE):
         if request is None:
@@ -237,7 +245,7 @@ class AppController:
                 s.save_error = str(error)
                 if request.kind == SaveKind.AUTO:
                     logging.error('Autosave failed: %s', error)
-                    self.status('自动暂存失败，请点击保存工程选择其他位置。')
+                    self.status('自动保存工程失败，请按 Ctrl+S 另存到其他位置。')
                 else:
                     self.report_error(error, remote=request.remote)
             elif request.snapshot.document == s.document_id:
@@ -248,6 +256,12 @@ class AppController:
                     self.status('工程已保存：' + str(s.project_path))
                 if self.home / 'autosave.hstudio' in request.paths:
                     s.autosave_revision = request.snapshot.revision
+                if (request.kind != SaveKind.MANUAL and s.auto_project_path is not None
+                        and s.auto_project_path in request.paths):
+                    if s.project_path == s.auto_project_path:
+                        s.saved_revision = request.snapshot.revision
+                    if request.snapshot.revision == s.revision and request.kind == SaveKind.AUTO:
+                        self.status('工程已自动保存，标记和曲谱修改已保留。')
             if error is None and self._pending_action is not None:
                 pending = self._pending_action
                 if pending.request.number == request.number:
@@ -296,7 +310,7 @@ class AppController:
             return
         request = None
         if self.state.project is not None:
-            request = self.saves.submit(self._save_snapshot(), (self.home / 'autosave.hstudio',), SaveKind.AUTO)
+            request = self.saves.submit(self._save_snapshot(), self._autosave_paths(), SaveKind.AUTO)
         self.emit('changed')
         return request
 
@@ -314,6 +328,7 @@ class AppController:
         s = self.state
         s.set_project(project, saved=True, new_document=True)
         s.project_path = path
+        s.auto_project_path = path
         s.source, s.parts, s.names, s.keys = None, {}, {}, []
         self.emit('document')
         self.position(0, '未播放', False)
@@ -335,13 +350,15 @@ class AppController:
         s = self.state
         s.set_project(None, saved=True, new_document=True)
         s.project_path, s.parts, s.names, s.keys = None, {}, {}, []
+        s.auto_project_path = None
         s.source = path
         s.selected_part = None
         if isinstance(sample_options, dict):
             track, channel = sample_options.get('track'), sample_options.get('channel')
             if type(track) is int and type(channel) is int:
                 s.selected_part = (track, channel)
-        self.jobs.start(JobKind.LOAD, s.revision, load_ranked_midi, s.source,
+        self.jobs.start(JobKind.LOAD, s.revision,
+                        partial(load_ranked_midi, project_root=self.home / 'song-projects'), s.source,
                         prepare=prepare, follow_up=FollowUp.PLAY if autoplay else FollowUp.NONE, remote=remote)
         self.emit('document')
         self.status('正在读取曲谱…')
@@ -404,11 +421,39 @@ class AppController:
         s = self.state
         if s.project is None:
             return
-        project = validate_project(dict(s.project, notes=notes))
+        candidate = dict(s.project, notes=notes)
+        highlight = candidate.pop('highlight', None)
+        project = validate_project(candidate)
+        # A shortened score cannot retain a marker beyond its new end.
+        if highlight is not None and any(n['end'] > highlight for n in project['notes']):
+            project['highlight'] = highlight
         s.set_project(project)
         self.playback.invalidate_after_edit()
         self.status('修改已记录。点试听即可听到修改后的旋律。')
         self.emit('autosave')
+        self.emit('changed')
+
+    def set_highlight(self, seconds):
+        self._idle()
+        s = self.state
+        if s.project is None or not s.has_notes:
+            raise ValueError('请先生成或打开曲谱。')
+        if s.transport == Transport.PLAYING:
+            raise RuntimeError('请先暂停试听，再添加心动片段标记。')
+        project = dict(s.project)
+        if seconds is None:
+            project.pop('highlight', None)
+        else:
+            project['highlight'] = seconds
+        project = validate_project(project)
+        if project.get('highlight') == s.project.get('highlight'):
+            return
+        position = s.logical_seek
+        s.set_project(project)
+        self.playback.invalidate_after_edit()
+        self.playback.seek_score(position)
+        self.status('心动片段标记已清除，正在自动保存…' if seconds is None else '心动片段标记已设置，正在自动保存…')
+        self.autosave()
         self.emit('changed')
 
     def update_preferences(self, preferences):
@@ -445,8 +490,10 @@ class AppController:
         if not snapshot['notes']:
             raise ValueError('请先双击音符图添加音符。')
         target_position = self.state.logical_seek
+        manual_seek = self.playback.manual_seek
         self.stop_preview()
         self.state.logical_seek = target_position
+        self.playback.manual_seek = manual_seek
         self.playback.stop_game(close=True)
         self.jobs.start(JobKind.EXPORT, self.state.revision, export_project_prepared, snapshot,
                         self.home / 'exports', follow_up=follow_up, remote=remote)
@@ -461,6 +508,12 @@ class AppController:
         if replace_project:
             s.set_project(project, new_document=True)
             s.project_path, s.logical_seek = None, 0
+            source = project.get('source')
+            if isinstance(source, dict) and source.get('path') and source.get('sha256'):
+                s.auto_project_path = song_project_path(self.home / 'song-projects', source['path'], source['sha256'])
+                s.project_path = s.auto_project_path
+            else:
+                s.auto_project_path = None
             self.emit('document')
         else:
             s.project = project
@@ -503,7 +556,18 @@ class AppController:
                     self.status('工程已变化，已忽略旧任务结果。')
                 elif job.kind == JobKind.LOAD:
                     self.install_parts(result)
-                    if job.prepare:
+                    self.state.auto_project_path = result.project_path
+                    if result.project is not None:
+                        project = deepcopy(result.project)
+                        project.setdefault('options', {})['skip_long_rests'] = self.preferences.skip_long_rests
+                        self.state.set_project(project, saved=True, new_document=True)
+                        self.state.project_path = result.project_path
+                        self.emit('document')
+                        self.position(0, '未播放', False)
+                        self.status('已打开自动保存的工程，标记和曲谱修改已恢复。')
+                        if job.prepare:
+                            self.begin_export(follow_up=job.follow_up, remote=job.remote)
+                    elif job.prepare:
                         self.begin_convert(follow_up=job.follow_up, remote=job.remote)
                 else:
                     self.show_result(result.folder, result.report,
@@ -526,9 +590,11 @@ class AppController:
 
     def seek_score(self, seconds):
         self.playback.seek_score(seconds)
+        self.playback.manual_seek = True
 
     def seek_audio(self, seconds):
         self.playback.seek_audio(seconds)
+        self.playback.manual_seek = True
 
     def listen(self, *, remote=False):
         self._idle()
@@ -538,7 +604,9 @@ class AppController:
         if s.export_dirty or not s.result:
             self.begin_export(follow_up=FollowUp.PLAY, remote=remote)
             return
-        self.playback.listen(s.result[0])
+        start = (s.project.get('highlight') if self.preferences.start_from_highlight
+                 and s.transport in (Transport.READY, Transport.ENDED) and not self.playback.manual_seek else None)
+        self.playback.listen(s.result[0], start_score=start)
 
     def pause(self):
         self.playback.pause()
@@ -554,7 +622,8 @@ class AppController:
             self.begin_export(follow_up=FollowUp.ARM if arm else FollowUp.GAME, remote=remote)
             return
         self.stop_preview()
-        self.playback.start_game(self.state.result[0], arm=arm)
+        start = self.state.project.get('highlight') if self.preferences.start_from_highlight else None
+        self.playback.start_game(self.state.result[0], arm=arm, start_score=start)
         self.status('演奏器已就绪；切到口琴界面按 F6，3 秒后开始。F8 退出。' if arm else '已发送演奏指令，请保持游戏口琴界面在前台。')
 
     def stop_game(self, *, close=False):
@@ -574,7 +643,7 @@ class AppController:
                 self._finish_close()
                 return True
             snapshot = self._save_snapshot()
-            paths = (self.home / 'autosave.hstudio',) if snapshot.project is not None else ()
+            paths = self._autosave_paths() if snapshot.project is not None else ()
             request = self.saves.submit(snapshot, paths, SaveKind.CLOSE)
             self._defer_until_saved(request, lambda _: self._finish_close(), 'close')
         if wait:

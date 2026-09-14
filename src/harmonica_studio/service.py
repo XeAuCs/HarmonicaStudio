@@ -13,6 +13,7 @@ from .paths import template_path
 from .project import make_project, validate_project, save_project, load_project
 from .rests import compress_long_rests
 from .transport import TimeMap, playback_anchors
+from .song_projects import find_song_project
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class LoadedParts:
     parts: dict
     names: dict
     keys: list
+    project_path: Path | None = None
+    project: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -43,13 +46,15 @@ def _check_cancel(cancel):
         raise InterruptedError('转换已取消。')
 
 
-def load_ranked_midi(source, cancel=None):
+def load_ranked_midi(source, cancel=None, *, project_root=None):
     _check_cancel(cancel)
+    project_path, project = (find_song_project(project_root, source, cancel)
+                             if project_root is not None else (None, None))
     parts, names = read_midi(source)
     _check_cancel(cancel)
     keys = [key for key, _ in rank_parts(parts, names)]
     _check_cancel(cancel)
-    return LoadedParts(parts, names, keys)
+    return LoadedParts(parts, names, keys, project_path, project)
 
 
 def _prepare_export(folder, report, project, actual):

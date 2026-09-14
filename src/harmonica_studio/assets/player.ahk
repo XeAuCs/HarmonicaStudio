@@ -2,6 +2,7 @@
 #SingleInstance Force
 #Warn All, StdOut
 ; Harmonica Studio remote protocol: 1
+; Harmonica Studio start offset: 1
 ; Generated event table. Empty template cannot play a song.
 eventText := "
 (
@@ -14,7 +15,10 @@ for line in StrSplit(eventText, "`n", "`r") {
     cols := StrSplit(line, ",")
     events.Push([Integer(cols[1]), cols[2], Integer(cols[3])])
 }
-if A_Args.Length && A_Args[1] = "--validate" {
+; The same pure slicing path is exercised by validation, without timers or input.
+if A_Args.Length && (A_Args[1] = "--validate" || A_Args[1] = "--dump-events") {
+    if A_Args.Length >= 2
+        events := EventsFrom(Integer(A_Args[2]))
     last := -1
     held := Map()
     for ev in events {
@@ -31,12 +35,22 @@ if A_Args.Length && A_Args[1] = "--validate" {
             held.Delete(ev[2])
         }
     }
-    ExitApp(held.Count ? 5 : 0)
+    if held.Count
+        ExitApp(5)
+    if A_Args[1] = "--dump-events" {
+        for ev in events
+            FileAppend(ev[1] "," ev[2] "," ev[3] "`n", "*", "UTF-8")
+    }
+    ExitApp(0)
 }
 running := false
 target := 0
 nextEvent := 1
 startAt := 0
+activeEvents := events
+defaultStartMs := A_Args.Length >= 4 ? Integer(A_Args[4]) : 0
+playOffsetMs := 0
+minimumPosition := 0.0
 heldKeys := Map()
 stopFile := A_Args.Length ? A_Args[1] : ""
 commandFile := A_Args.Length >= 2 ? A_Args[2] : ""
@@ -58,7 +72,7 @@ F6::TogglePlay()
 F8::ExitApp()
 
 CheckControl() {
-    global stopFile, commandFile, lastCommandId
+    global stopFile, commandFile, lastCommandId, defaultStartMs
     ; Exit always takes precedence, including a request made during startup.
     if stopFile != "" && FileExist(stopFile)
         ExitApp()
@@ -68,13 +82,15 @@ CheckControl() {
         if FileGetSize(commandFile) > 4096
             return
         command := FileRead(commandFile, "UTF-8")
-        ; The desktop writes exactly these two fields using atomic replacement.
-        if !RegExMatch(command, '^\s*\{\s*"id"\s*:\s*(\d+)\s*,\s*"action"\s*:\s*"(play|stop)"\s*\}\s*$', &match)
+        ; Optional start_ms is an integer in the full event-table timeline.
+        if !RegExMatch(command, '^\s*\{\s*"id"\s*:\s*(\d+)\s*,\s*"action"\s*:\s*"(play|stop)"(?:\s*,\s*"start_ms"\s*:\s*(\d+))?\s*\}\s*$', &match)
             return
         requestId := Integer(match[1])
         if requestId <= lastCommandId
             return
         lastCommandId := requestId
+        if match[3] != ""
+            defaultStartMs := Integer(match[3])
         if match[2] = "stop"
             StopPlay("已从手机停止演奏。")
         else
@@ -94,9 +110,10 @@ JsonString(value) {
 
 PublishStatus(*) {
     global statusFile, lastCommandId, state, stateMessage, position, duration, running, startAt
+    global playOffsetMs, minimumPosition
     if statusFile = ""
         return
-    current := running ? Min(duration, Max(0.0, (NowMs() - startAt) / 1000)) : position
+    current := running ? Min(duration, Max(minimumPosition, (NowMs() - startAt + playOffsetMs) / 1000)) : position
     data := '{"request_id":' lastCommandId ',"state":' JsonString(state)
          . ',"position":' Format('{:.3f}', current) ',"duration":' Format('{:.3f}', duration)
          . ',"message":' JsonString(stateMessage) '}'
@@ -158,14 +175,52 @@ TogglePlay() {
         BeginPlay()
 }
 
+EventsFrom(startMs) {
+    global events
+    if startMs = 0
+        return events
+    if startMs < 0 || !events.Length || startMs >= events[events.Length][1]
+        return []
+    heldAtStart := Map()
+    remaining := []
+    for tableEvent in events {
+        if tableEvent[1] <= startMs {
+            if tableEvent[3]
+                heldAtStart[tableEvent[2]] := true
+            else if heldAtStart.Has(tableEvent[2])
+                heldAtStart.Delete(tableEvent[2])
+        } else
+            remaining.Push([tableEvent[1] - startMs + 100, tableEvent[2], tableEvent[3]])
+    }
+    clipped := []
+    ; Restore modifiers 25 ms before the first held note; keep later times intact.
+    for key, _ in heldAtStart {
+        if InStr(key, "Button")
+            clipped.Push([75, key, 1])
+    }
+    for key, _ in heldAtStart {
+        if !InStr(key, "Button")
+            clipped.Push([100, key, 1])
+    }
+    for tableEvent in remaining
+        clipped.Push(tableEvent)
+    return clipped
+}
+
 BeginPlay() {
     global running, target, nextEvent, startAt, events
     global state, stateMessage, position
+    global activeEvents, defaultStartMs, playOffsetMs, minimumPosition
     ; A repeated phone request never toggles a playing song off.
     if running
         return
     if !events.Length {
         StopPlay("尚未加入曲谱，请先转换 MIDI。")
+        return
+    }
+    activeEvents := EventsFrom(defaultStartMs)
+    if !activeEvents.Length {
+        StopPlay("心动片段起点已超出曲谱，请在电脑上重新设置。")
         return
     }
     target := WinExist("A")
@@ -177,8 +232,10 @@ BeginPlay() {
     }
     nextEvent := 1
     startAt := NowMs() + 3000
+    playOffsetMs := defaultStartMs ? defaultStartMs - 100 : 0
+    minimumPosition := defaultStartMs / 1000
     running := true
-    position := 0.0
+    position := minimumPosition
     state := "countdown"
     stateMessage := "3 秒后开始演奏；F6 停止，F8 退出。"
     SetKeyDelay(-1, -1)
@@ -188,7 +245,7 @@ BeginPlay() {
 }
 
 Tick() {
-    global running, target, nextEvent, startAt, events, heldKeys
+    global running, target, nextEvent, startAt, activeEvents, heldKeys
     global state, stateMessage
     if !running
         return
@@ -207,12 +264,12 @@ Tick() {
     stateMessage := "正在游戏内演奏；F6 停止，F8 退出。"
     ToolTip()
     try {
-        while running && nextEvent <= events.Length && events[nextEvent][1] <= elapsed {
+        while running && nextEvent <= activeEvents.Length && activeEvents[nextEvent][1] <= elapsed {
             if !WinActive("ahk_id " target) {
                 StopPlay("电脑已切换窗口，演奏自动停止。")
                 return
             }
-            currentEvent := events[nextEvent]
+            currentEvent := activeEvents[nextEvent]
             ; Avoid sending a burst of stale notes after a long system stall.
             if elapsed - currentEvent[1] > 150 {
                 StopPlay("系统延迟过大，演奏已停止。")
@@ -231,7 +288,7 @@ Tick() {
             nextEvent += 1
             Critical("Off")
         }
-        if nextEvent > events.Length
+        if nextEvent > activeEvents.Length
             StopPlay("演奏完成。", true)
     } catch {
         Critical("Off")

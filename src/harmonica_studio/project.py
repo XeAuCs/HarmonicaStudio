@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 import json
+import math
 from pathlib import Path
 import uuid
 
@@ -39,6 +40,13 @@ def validate_project(project):
         raise ValueError('工程名称须为 1 至 200 个字符。')
     normalized = normalize_score_notes(project.get('notes'), max_notes=MAX_NOTES)
     result = {'schema_version': SCHEMA_VERSION, 'title': title.strip(), 'notes': normalized}
+    highlight = project.get('highlight')
+    if highlight is not None:
+        duration = max((note['end'] for note in normalized), default=0)
+        if (type(highlight) not in (int, float) or not 0 <= highlight < duration
+                or not math.isfinite(highlight)):
+            raise ValueError('心动片段标记须位于曲谱开始至结束之前。')
+        result['highlight'] = float(highlight)
     for name in ('source', 'options', 'report'):
         if name in project and project[name] is not None:
             value = project[name]
